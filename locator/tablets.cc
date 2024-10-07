@@ -669,7 +669,7 @@ private:
                     return info->next;
                 }
             }
-            on_internal_error(tablet_logger, format("Invalid replica selector", static_cast<int>(info->writes)));
+            on_internal_error(tablet_logger, format("Invalid replica selector {}", static_cast<int>(info->writes)));
         });
         tablet_logger.trace("get_replicas_for_write({}): table={}, tablet={}, replicas={}", search_token, _table, tablet, replicas);
         return replicas;
@@ -737,7 +737,7 @@ public:
             case write_replica_set_selector::next:
                 return {};
         }
-        on_internal_error(tablet_logger, format("Invalid replica selector", static_cast<int>(info->writes)));
+        on_internal_error(tablet_logger, format("Invalid replica selector {}", static_cast<int>(info->writes)));
     }
 
     virtual inet_address_vector_replica_set get_endpoints_for_reading(const token& search_token) const override {
@@ -755,7 +755,7 @@ public:
                     return info->next;
                 }
             }
-            on_internal_error(tablet_logger, format("Invalid replica selector", static_cast<int>(info->reads)));
+            on_internal_error(tablet_logger, format("Invalid replica selector {}", static_cast<int>(info->reads)));
         });
         tablet_logger.trace("get_endpoints_for_reading({}): table={}, tablet={}, replicas={}", search_token, _table, tablet, replicas);
         auto result = to_replica_set(replicas);
