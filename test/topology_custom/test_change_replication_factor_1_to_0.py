@@ -27,20 +27,30 @@ logger = logging.getLogger(__name__)
 @pytest.mark.asyncio
 async def test_change_replication_factor_1_to_0(request: pytest.FixtureRequest, manager: ManagerClient, use_tablets: bool) -> None:
     CONFIG = {"endpoint_snitch": "GossipingPropertyFileSnitch", "enable_tablets": str(use_tablets)}
+    cmdline = [
+        '--logger-log-level', 'storage_proxy=trace',
+        '--logger-log-level', 'replication_strategy=trace',
+        '--logger-log-level', 'tablets=trace',
+        '--logger-log-level', 'schema_tables=trace',
+        '--logger-log-level', 'raft_topology=trace',
+    ]
     logger.info("Creating a new cluster")
     for i in range(2):
         await manager.server_add(
             config=CONFIG,
-            property_file={'dc': f'dc{i}', 'rack': f'myrack{i}'})
+            property_file={'dc': f'dc{i}', 'rack': f'myrack{i}'},
+            cmdline=cmdline)
 
     cql = manager.get_cql()
     await cql.run_async("create keyspace ks with replication = {'class': 'NetworkTopologyStrategy', 'dc0': 1, 'dc1': 1}")
     await cql.run_async("create table ks.t (pk int primary key)")
+    stmt = cql.prepare(f"SELECT * FROM ks.t where pk = ?")
+    await cql.run_async(stmt, [0])
 
     srvs = await manager.running_servers()
     await wait_for_cql_and_get_hosts(cql, srvs, time.time() + 60)
 
-    stmt = cql.prepare(f"SELECT * FROM ks.t where pk = ?")
+
     stmt.consistency_level = ConsistencyLevel.LOCAL_QUORUM
 
     stop_event = asyncio.Event()

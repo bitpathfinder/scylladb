@@ -608,7 +608,8 @@ static future<> merge_tables_and_views(distributed<service::storage_proxy>& prox
     });
 
     if (tablet_hint) {
-        slogger.info("Tablet metadata changed");
+        slogger.info("Tablet metadata changed!");
+        slogger.info("Tablet metadata:  {} ", tablet_hint);
         // We must do it after tables are dropped so that table snapshot doesn't experience missing tablet map,
         // and so that compaction groups are not destroyed altogether.
         // We must also do it before tables are created so that new tables see the tablet map.

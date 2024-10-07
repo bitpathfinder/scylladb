@@ -214,6 +214,7 @@ future<tablet_metadata> tablet_metadata::copy() const {
 }
 
 void tablet_metadata::set_tablet_map(table_id id, tablet_map map) {
+    tablet_logger.debug("set_tablet_map id {}, map {} ", id, map );
     auto map_ptr = make_lw_shared<const tablet_map>(std::move(map));
     auto it = _tablets.find(id);
     if (it == _tablets.end()) {
@@ -748,6 +749,7 @@ public:
             if (!info) {
                 return tablets.get_tablet_info(tablet).replicas;
             }
+            tablet_logger.trace("get_endpoints_for_reading  read_replica_set_selector = {}", (info->reads == read_replica_set_selector::previous? "previous":"next"));
             switch (info->reads) {
                 case read_replica_set_selector::previous:
                     return tablets.get_tablet_info(tablet).replicas;

@@ -47,7 +47,7 @@ network_topology_strategy::network_topology_strategy(replication_strategy_params
 
     size_t rep_factor = 0;
     for (auto& config_pair : opts) {
-        auto& key = config_pair.first;
+        const auto& key = config_pair.first;
         auto& val = config_pair.second;
 
         //
@@ -163,7 +163,7 @@ class natural_endpoints_tracker {
 
     const token_metadata& _tm;
     const topology& _tp;
-    std::unordered_map<sstring, size_t> _dc_rep_factor;
+    const std::unordered_map<sstring, size_t>& _dc_rep_factor;
 
     //
     // We want to preserve insertion order so that the first added endpoint
@@ -202,12 +202,12 @@ public:
 
         auto size_for = [](auto& map, auto& k) {
             auto i = map.find(k);
-            return i != map.end() ? i->second.size() : size_t(0);
+            return i != map.end() ? i->second.size() : static_cast<size_t>(0);
         };
 
         // Create a data_center_endpoints object for each non-empty DC.
-        for (auto& [dc, rf] : _dc_rep_factor) {
-            auto node_count = size_for(_token_owners, dc);
+        for (const auto& [dc, rf] : _dc_rep_factor) {
+            const auto node_count = size_for(_token_owners, dc);
 
             if (rf == 0 || node_count == 0) {
                 continue;
@@ -219,7 +219,7 @@ public:
     }
 
     bool add_endpoint_and_check_if_done(host_id ep) {
-        auto& loc = _tp.get_location(ep);
+        const endpoint_dc_rack& loc = _tp.get_location(ep);
         auto i = _dcs.find(loc.dc);
         if (i != _dcs.end() && i->second.add_endpoint_and_check_if_done(ep, loc)) {
             --_dcs_to_fill;
@@ -236,10 +236,10 @@ public:
     }
 
     static void check_enough_endpoints(const token_metadata& tm, const std::unordered_map<sstring, size_t>& dc_rf) {
-        auto dc_endpoints = tm.get_datacenter_token_owners_ips();
-        auto endpoints_in = [&dc_endpoints](sstring dc) {
+        const auto dc_endpoints = tm.get_datacenter_token_owners_ips();
+        auto endpoints_in = [&dc_endpoints](const sstring& dc) {
             auto i = dc_endpoints.find(dc);
-            return i != dc_endpoints.end() ? i->second.size() : size_t(0);
+            return i != dc_endpoints.end() ? i->second.size() : size_t{0};
         };
         for (const auto& [dc, rf] : dc_rf) {
             if (rf > endpoints_in(dc)) {
@@ -253,10 +253,11 @@ public:
 future<host_id_set>
 network_topology_strategy::calculate_natural_endpoints(
     const token& search_token, const token_metadata& tm) const {
+    rslogger.debug("natural_endpoints_tracker created");
 
     natural_endpoints_tracker tracker(tm, _dc_rep_factor);
 
-    for (auto& next : tm.ring_range(search_token)) {
+    for (const auto& next : tm.ring_range(search_token)) {
         co_await coroutine::maybe_yield();
 
         host_id ep = *tm.get_endpoint(next);
