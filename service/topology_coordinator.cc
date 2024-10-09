@@ -1533,6 +1533,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
 
     // Returns `true` iff there was work to do.
     future<bool> handle_topology_transition(group0_guard guard) {
+        rtlogger.info("handle_topology_transition");
         auto tstate = _topo_sm._topology.tstate;
         if (!tstate) {
             // When adding a new source of work, make sure to update should_preempt_balancing() as well.

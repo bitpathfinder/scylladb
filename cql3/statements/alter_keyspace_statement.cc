@@ -191,6 +191,7 @@ future<std::tuple<::shared_ptr<cql_transport::event::schema_change>, cql3::cql_w
 cql3::statements::alter_keyspace_statement::prepare_schema_mutations(query_processor& qp, service::query_state& state, const query_options& options, service::group0_batch& mc) const {
     using namespace cql_transport;
     try {
+        mylogger.info("prepare_schema_mutations");
         event::schema_change::target_type target_type = event::schema_change::target_type::KEYSPACE;
         auto ks = qp.db().find_keyspace(_name);
         auto ks_md = ks.metadata();

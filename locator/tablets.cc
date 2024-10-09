@@ -745,6 +745,7 @@ public:
         auto&& tablets = get_tablet_map();
         auto tablet = tablets.get_tablet_id(search_token);
         auto&& info = tablets.get_tablet_transition_info(tablet);
+        tablet_logger.trace("_transitions = {}", tablets.has_transitions()?"yes":"no");
         auto&& replicas = std::invoke([&] () -> const tablet_replica_set& {
             if (!info) {
                 return tablets.get_tablet_info(tablet).replicas;
