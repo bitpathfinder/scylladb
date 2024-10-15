@@ -620,9 +620,18 @@ future<bool> check_tablet_replica_shards(const tablet_metadata& tm, host_id this
 }
 
 class tablet_effective_replication_map : public effective_replication_map {
+    struct effective_replication_factors
+    {
+        uint32_t global_rf{0};
+        uint32_t local_rf{0};
+    };
+
+    using token_to_rf_map = absl::flat_hash_map<dht::token, effective_replication_factors>;
+
     table_id _table;
     tablet_sharder _sharder;
     mutable const tablet_map* _tmap = nullptr;
+    mutable token_to_rf_map _replication_factor_cache;
 private:
     inet_address_vector_replica_set to_replica_set(const tablet_replica_set& replicas) const {
         inet_address_vector_replica_set result;
@@ -684,6 +693,20 @@ public:
             , _table(table)
             , _sharder(*_tmptr, table)
     { }
+
+    [[nodiscard]] size_t get_effective_replication_factor(const dht::token id) const override {
+        const auto it = _replication_factor_cache.find(id);
+        if (it != _replication_factor_cache.end()) {
+            return it->second.global_rf;
+        }
+        const auto replicas = get_endpoints_for_reading(id);
+        const auto global_rf = replicas.size();
+        const auto local_rf = get_topology().count_local_endpoints(replicas);
+        [[maybe_unused]] const auto inserted_item =
+                _replication_factor_cache.emplace(std::piecewise_construct, std::forward_as_tuple(id), std::forward_as_tuple(global_rf, local_rf));
+        assert(inserted_item.second == true);
+        return global_rf;
+    }
 
     virtual ~tablet_effective_replication_map() = default;
 

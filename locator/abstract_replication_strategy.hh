@@ -187,7 +187,7 @@ using mutable_replication_strategy_ptr = seastar::shared_ptr<abstract_replicatio
 class effective_replication_map {
 protected:
     replication_strategy_ptr _rs;
-    token_metadata_ptr _tmptr;
+    token_metadata_ptr _tmptr;    
     size_t _replication_factor;
     std::unique_ptr<abort_source> _validity_abort_source;
 public:
@@ -198,8 +198,12 @@ public:
     const abstract_replication_strategy& get_replication_strategy() const noexcept { return *_rs; }
     const token_metadata& get_token_metadata() const noexcept { return *_tmptr; }
     const token_metadata_ptr& get_token_metadata_ptr() const noexcept { return _tmptr; }
-    const topology& get_topology() const noexcept { return _tmptr->get_topology(); }
-    size_t get_replication_factor() const noexcept { return _replication_factor; }
+    const topology& get_topology() const noexcept { return _tmptr->get_topology(); }    
+    
+    size_t get_expected_replication_factor() const noexcept { return _replication_factor; }
+    
+
+    [[nodiscard]] virtual size_t get_effective_replication_factor([[maybe_unused]] dht::token id) const = 0;
 
     void invalidate() const noexcept {
         _validity_abort_source->request_abort();
@@ -324,7 +328,7 @@ private:
     ring_mapping _read_endpoints;
     std::unordered_set<locator::host_id> _dirty_endpoints;
     std::optional<factory_key> _factory_key = std::nullopt;
-    effective_replication_map_factory* _factory = nullptr;
+    effective_replication_map_factory* _factory = nullptr;    
 
     friend class abstract_replication_strategy;
     friend class effective_replication_map_factory;
@@ -351,6 +355,10 @@ public:
     vnode_effective_replication_map() = delete;
     vnode_effective_replication_map(vnode_effective_replication_map&&) = default;
     ~vnode_effective_replication_map();
+
+    [[nodiscard]] size_t get_effective_replication_factor([[maybe_unused]] const dht::token id) const override {
+        return get_expected_replication_factor();
+    }
 
     struct cloned_data {
         replication_map replication_map;
