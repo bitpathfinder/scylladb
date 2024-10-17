@@ -620,18 +620,16 @@ future<bool> check_tablet_replica_shards(const tablet_metadata& tm, host_id this
 }
 
 class tablet_effective_replication_map : public effective_replication_map {
-    struct effective_replication_factors
-    {
-        uint32_t global_rf{0};
-        uint32_t local_rf{0};
-    };
-
-    using token_to_rf_map = absl::flat_hash_map<dht::token, effective_replication_factors>;
+    using replication_factor_t = uint16_t; 
+    using replication_factor_list = utils::small_vector<replication_factor_t, 8>;
 
     table_id _table;
     tablet_sharder _sharder;
-    mutable const tablet_map* _tmap = nullptr;
-    mutable token_to_rf_map _replication_factor_cache;
+    mutable const tablet_map* _tmap = nullptr;    
+    absl::flat_hash_map<sstring, replication_factor_t> _datacenter_map;
+    std::vector<sstring> _reverse_datacenter_map;
+    absl::flat_hash_map<dht::token, replication_factor_list> _replication_factor_map;
+
 private:
     inet_address_vector_replica_set to_replica_set(const tablet_replica_set& replicas) const {
         inet_address_vector_replica_set result;
@@ -694,18 +692,56 @@ public:
             , _sharder(*_tmptr, table)
     { }
 
-    [[nodiscard]] size_t get_effective_replication_factor(const dht::token id) const override {
-        const auto it = _replication_factor_cache.find(id);
-        if (it != _replication_factor_cache.end()) {
-            return it->second.global_rf;
+
+    void fill_datacenter_map() {
+        uint32_t datacenter_index = 0;
+        for (const sstring& datacenter : get_topology().get_datacenters()) {
+            _reverse_datacenter_map.emplace_back(datacenter);
+            _datacenter_map.emplace(datacenter, datacenter_index);
+            ++datacenter_index;
         }
-        const auto replicas = get_endpoints_for_reading(id);
-        const auto global_rf = replicas.size();
-        const auto local_rf = get_topology().count_local_endpoints(replicas);
-        [[maybe_unused]] const auto inserted_item =
-                _replication_factor_cache.emplace(std::piecewise_construct, std::forward_as_tuple(id), std::forward_as_tuple(global_rf, local_rf));
-        assert(inserted_item.second == true);
-        return global_rf;
+    }
+
+    seastar::future<> build_dc_replication_factor_map() {
+        const tablet_map& tablets = get_tablet_map();
+        const topology& topo = get_topology();
+        fill_datacenter_map();
+
+        const std::vector<token> token_list = co_await tablets.get_sorted_tokens();
+        for (const token token_id : token_list) {
+            const inet_address_vector_replica_set replicas = get_endpoints_for_reading(token_id);
+            auto it = _replication_factor_map.emplace(token_id, replication_factor_list{});
+            assert(it.second == true);
+            auto& token_rf_list = it.first->second;
+            token_rf_list.resize(_reverse_datacenter_map.size(), 0);
+
+            for (const auto& node : replicas) {
+                const sstring& datacenter = topo.get_datacenter(node);
+                const auto it = _datacenter_map.find(datacenter);
+                assert(it != _datacenter_map.end());
+                const auto index = it->second;
+                assert(index < token_rf_list.size());
+                ++token_rf_list[index];
+            }
+            co_await seastar::maybe_yield();
+        }
+        co_return;
+    }
+
+    [[nodiscard]] size_t get_replication_factor(const dht::token id, const seastar::sstring& datacenter) const override {
+        const auto it = _replication_factor_map.find(id);
+        assert(it != _replication_factor_map.end());
+        const auto dc_it = _datacenter_map.find(datacenter);
+        assert(dc_it != _datacenter_map.end());
+        assert(dc_it->second < it->second.size());
+        return it->second[dc_it->second];
+    }
+
+    [[nodiscard]] size_t get_replication_factor(const dht::token id) const override {
+        const auto it = _replication_factor_map.find(id);
+        assert(it != _replication_factor_map.end());
+        const auto rf = std::accumulate(it->second.begin(), it->second.end(), 0);
+        return rf;
     }
 
     virtual ~tablet_effective_replication_map() = default;

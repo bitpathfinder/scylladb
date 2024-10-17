@@ -29,23 +29,12 @@ namespace db {
 logging::logger cl_logger("consistency");
 
 size_t quorum_for(const locator::effective_replication_map& erm, const dht::token token_id) {
-    const size_t replication_factor = erm.get_effective_replication_factor(token_id);
+    const size_t replication_factor = erm.get_replication_factor(token_id);
     return replication_factor ? (replication_factor / 2) + 1 : 0;
 }
 
 size_t local_quorum_for(const locator::effective_replication_map& erm, const sstring& dc, const dht::token token_id) {
-    using namespace locator;
-
-    const auto& rs = erm.get_replication_strategy();
-
-    if (rs.get_type() == replication_strategy_type::network_topology) {
-        const network_topology_strategy* nrs =
-            static_cast<const network_topology_strategy*>(&rs);
-        size_t replication_factor = nrs->get_replication_factor(dc);
-        return replication_factor ? (replication_factor / 2) + 1 : 0;
-    }
-
-    return quorum_for(erm, token_id);
+    return erm.get_replication_factor(token_id, dc);
 }
 
 size_t block_for_local_serial(const locator::effective_replication_map& erm, const dht::token token_id) {
@@ -99,7 +88,7 @@ size_t block_for(const locator::effective_replication_map& erm, consistency_leve
     case consistency_level::SERIAL:
         return quorum_for(erm, token_id);
     case consistency_level::ALL:
-        return erm.get_expected_replication_factor();
+        return erm.get_replication_factor(token_id);
     case consistency_level::LOCAL_QUORUM:
         [[fallthrough]];
     case consistency_level::LOCAL_SERIAL:

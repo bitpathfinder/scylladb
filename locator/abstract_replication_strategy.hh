@@ -198,12 +198,15 @@ public:
     const abstract_replication_strategy& get_replication_strategy() const noexcept { return *_rs; }
     const token_metadata& get_token_metadata() const noexcept { return *_tmptr; }
     const token_metadata_ptr& get_token_metadata_ptr() const noexcept { return _tmptr; }
-    const topology& get_topology() const noexcept { return _tmptr->get_topology(); }    
-    
-    size_t get_expected_replication_factor() const noexcept { return _replication_factor; }
-    
+    const topology& get_topology() const noexcept { return _tmptr->get_topology(); }
 
-    [[nodiscard]] virtual size_t get_effective_replication_factor([[maybe_unused]] dht::token id) const = 0;
+    [[nodiscard]] size_t get_schema_replication_factor() const {
+        return _replication_factor;
+    }
+
+    [[nodiscard]] virtual size_t get_replication_factor(dht::token id) const = 0;
+
+    [[nodiscard]] virtual size_t get_replication_factor(dht::token id, const seastar::sstring& datacenter) const = 0;
 
     void invalidate() const noexcept {
         _validity_abort_source->request_abort();
@@ -354,11 +357,13 @@ public:
     { }
     vnode_effective_replication_map() = delete;
     vnode_effective_replication_map(vnode_effective_replication_map&&) = default;
-    ~vnode_effective_replication_map();
+    ~vnode_effective_replication_map(); 
 
-    [[nodiscard]] size_t get_effective_replication_factor([[maybe_unused]] const dht::token id) const override {
-        return get_expected_replication_factor();
+    [[nodiscard]] size_t get_replication_factor([[maybe_unused]] const dht::token id) const override {
+        return get_schema_replication_factor();
     }
+
+    [[nodiscard]] size_t get_replication_factor(dht::token id, const seastar::sstring& datacenter) const override;
 
     struct cloned_data {
         replication_map replication_map;
