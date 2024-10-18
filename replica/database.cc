@@ -912,7 +912,7 @@ future<> database::add_column_family(keyspace& ks, schema_ptr schema, column_fam
     auto&& rs = ks.get_replication_strategy();
     locator::effective_replication_map_ptr erm;
     if (auto pt_rs = rs.maybe_as_per_table()) {
-        erm = pt_rs->make_replication_map(schema->id(), _shared_token_metadata.get());
+        erm = co_await pt_rs->make_replication_map(schema->id(), _shared_token_metadata.get());
     } else {
         erm = ks.get_vnode_effective_replication_map();
     }

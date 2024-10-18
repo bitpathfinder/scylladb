@@ -690,7 +690,7 @@ public:
             : effective_replication_map(std::move(rs), std::move(tmptr), replication_factor)
             , _table(table)
             , _sharder(*_tmptr, table)
-    { }
+    {}
 
 
     void fill_datacenter_map() {
@@ -709,6 +709,7 @@ public:
 
         const std::vector<token> token_list = co_await tablets.get_sorted_tokens();
         for (const token token_id : token_list) {
+            tablet_logger.info("Adding token {} ", token_id);
             const inet_address_vector_replica_set replicas = get_endpoints_for_reading(token_id);
             auto it = _replication_factor_map.emplace(token_id, replication_factor_list{});
             assert(it.second == true);
@@ -725,10 +726,12 @@ public:
             }
             co_await seastar::maybe_yield();
         }
+        tablet_logger.info("Added {} records to rf map", _replication_factor_map.size());
         co_return;
     }
 
     [[nodiscard]] size_t get_replication_factor(const dht::token id, const seastar::sstring& datacenter) const override {
+        tablet_logger.info("getting rf for toke {}, dc {}", id, datacenter);
         const auto it = _replication_factor_map.find(id);
         assert(it != _replication_factor_map.end());
         const auto dc_it = _datacenter_map.find(datacenter);
@@ -924,9 +927,11 @@ std::unordered_set<sstring> tablet_aware_replication_strategy::recognized_tablet
     return opts;
 }
 
-effective_replication_map_ptr tablet_aware_replication_strategy::do_make_replication_map(
+future<effective_replication_map_ptr> tablet_aware_replication_strategy::do_make_replication_map(
         table_id table, replication_strategy_ptr rs, token_metadata_ptr tm, size_t replication_factor) const {
-    return seastar::make_shared<tablet_effective_replication_map>(table, std::move(rs), std::move(tm), replication_factor);
+    auto erm = seastar::make_shared<tablet_effective_replication_map>(table, std::move(rs), std::move(tm), replication_factor);
+    co_await erm->build_dc_replication_factor_map();
+    co_return erm;
 }
 
 void tablet_metadata_guard::check() noexcept {
