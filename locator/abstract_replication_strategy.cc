@@ -86,6 +86,7 @@ sstring abstract_replication_strategy::to_qualified_class_name(std::string_view 
 }
 
 inet_address_vector_replica_set vnode_effective_replication_map::get_natural_endpoints_without_node_being_replaced(const token& search_token) const {
+    rslogger.info("get_natural_endpoints_without_node_being_replaced");
     inet_address_vector_replica_set natural_endpoints = get_natural_endpoints(search_token);
     maybe_remove_node_being_replaced(*_tmptr, *_rs, natural_endpoints);
     return natural_endpoints;

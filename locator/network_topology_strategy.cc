@@ -299,7 +299,7 @@ future<effective_replication_map_ptr> network_topology_strategy::make_replicatio
     if (!uses_tablets()) {
         on_internal_error(rslogger, format("make_replication_map() called for table {} but replication strategy not configured to use tablets", table));
     }
-    return do_make_replication_map(table, shared_from_this(), std::move(tm), _rep_factor);
+    co_return co_await do_make_replication_map(table, shared_from_this(), std::move(tm), _rep_factor);
 }
 
 //
@@ -565,6 +565,10 @@ sstring network_topology_strategy::sanity_check_read_replicas(const effective_re
         size_t replication_factor{0};
         size_t node_count{0};
     };
+    const auto& replication_strategy = erm.get_replication_strategy();
+    if (replication_strategy.uses_tablets()) {
+        return {};
+    }
 
     absl::flat_hash_map<sstring, rf_node_count> data_centers_replication_factor;
     std::ranges::for_each(read_replicas, [&data_centers_replication_factor, &topology, this](const auto& node) {

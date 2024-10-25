@@ -28,13 +28,22 @@ namespace db {
 
 logging::logger cl_logger("consistency");
 
+namespace {
+
+inline constexpr size_t quorum(const size_t replication_factor) {
+    return replication_factor > 0 ? replication_factor / 2 + 1 : 0;
+}
+
+} // namespace
+
 size_t quorum_for(const locator::effective_replication_map& erm, const dht::token token_id) {
     const size_t replication_factor = erm.get_replication_factor(token_id);
-    return replication_factor ? (replication_factor / 2) + 1 : 0;
+    return quorum(replication_factor);
 }
 
 size_t local_quorum_for(const locator::effective_replication_map& erm, const sstring& dc, const dht::token token_id) {
-    return erm.get_replication_factor(token_id, dc);
+    const size_t replication_factor = erm.get_replication_factor(token_id, dc);
+    return quorum(replication_factor);
 }
 
 size_t block_for_local_serial(const locator::effective_replication_map& erm, const dht::token token_id) {

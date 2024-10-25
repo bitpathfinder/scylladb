@@ -626,9 +626,8 @@ class tablet_effective_replication_map : public effective_replication_map {
     table_id _table;
     tablet_sharder _sharder;
     mutable const tablet_map* _tmap = nullptr;    
-    absl::flat_hash_map<sstring, replication_factor_t> _datacenter_map;
-    std::vector<sstring> _reverse_datacenter_map;
-    absl::flat_hash_map<dht::token, replication_factor_list> _replication_factor_map;
+    absl::flat_hash_map<sstring, replication_factor_t> _datacenter_map;     
+    std::vector<replication_factor_list> _tablet_to_dc_replication_factor_map;
 
 private:
     inet_address_vector_replica_set to_replica_set(const tablet_replica_set& replicas) const {
@@ -638,6 +637,7 @@ private:
         for (auto&& replica : replicas) {
             auto* node = topo.find_node(replica.host);
             if (node && !node->left()) {
+                tablet_logger.info("Adding node : {}", *node);
                 result.emplace_back(node->endpoint());
             }
         }
@@ -661,6 +661,7 @@ private:
     }
 
     const tablet_replica_set& get_replicas_for_write(dht::token search_token) const {
+        tablet_logger.trace("tablets: get_replicas_for_write");
         auto&& tablets = get_tablet_map();
         auto tablet = tablets.get_tablet_id(search_token);
         auto* info = tablets.get_tablet_transition_info(tablet);
@@ -692,12 +693,14 @@ public:
             , _sharder(*_tmptr, table)
     {}
 
-
     void fill_datacenter_map() {
         uint32_t datacenter_index = 0;
-        for (const sstring& datacenter : get_topology().get_datacenters()) {
-            _reverse_datacenter_map.emplace_back(datacenter);
+        const auto& data_centers_list = get_topology().get_datacenters();
+        _datacenter_map.reserve(data_centers_list.size());
+
+        for (const sstring& datacenter : data_centers_list) {
             _datacenter_map.emplace(datacenter, datacenter_index);
+            tablet_logger.trace("Adding datacenter index={}, name={}", datacenter_index, datacenter);
             ++datacenter_index;
         }
     }
@@ -706,44 +709,51 @@ public:
         const tablet_map& tablets = get_tablet_map();
         const topology& topo = get_topology();
         fill_datacenter_map();
-
-        const std::vector<token> token_list = co_await tablets.get_sorted_tokens();
-        for (const token token_id : token_list) {
-            tablet_logger.info("Adding token {} ", token_id);
-            const inet_address_vector_replica_set replicas = get_endpoints_for_reading(token_id);
-            auto it = _replication_factor_map.emplace(token_id, replication_factor_list{});
-            assert(it.second == true);
-            auto& token_rf_list = it.first->second;
-            token_rf_list.resize(_reverse_datacenter_map.size(), 0);
-
+        _tablet_to_dc_replication_factor_map.reserve(tablets.tablet_count());        
+        for (size_t tablet_index = 0; tablet_index < tablets.tablet_count(); ++tablet_index) {            
+            const tablet_replica_set& replicas = get_endpoints_for_reading(tablet_id{tablet_index});
+            _tablet_to_dc_replication_factor_map.emplace_back();
+            auto& token_rf_list = _tablet_to_dc_replication_factor_map.back();
+            token_rf_list.resize(_datacenter_map.size(), 0);
             for (const auto& node : replicas) {
-                const sstring& datacenter = topo.get_datacenter(node);
+                const locator::node* node_ptr = topo.find_node(node.host);
+                if (node_ptr == nullptr) {
+                    continue;
+                }
+                const sstring& datacenter = topo.get_datacenter(node.host);
                 const auto it = _datacenter_map.find(datacenter);
                 assert(it != _datacenter_map.end());
+                if (it == _datacenter_map.end()) {                    
+                    tablet_logger.debug("Could not find datacenter {} for node {} ", datacenter, node);                    
+                    continue;
+                }                
                 const auto index = it->second;
                 assert(index < token_rf_list.size());
                 ++token_rf_list[index];
             }
             co_await seastar::maybe_yield();
         }
-        tablet_logger.info("Added {} records to rf map", _replication_factor_map.size());
+        tablet_logger.info("Added {} records to rf map", _tablet_to_dc_replication_factor_map.size());
         co_return;
     }
 
     [[nodiscard]] size_t get_replication_factor(const dht::token id, const seastar::sstring& datacenter) const override {
-        tablet_logger.info("getting rf for toke {}, dc {}", id, datacenter);
-        const auto it = _replication_factor_map.find(id);
-        assert(it != _replication_factor_map.end());
+        tablet_logger.trace("Get RF for token {}, dc {}", id, datacenter);
+        auto tablet = get_tablet_map().get_tablet_id(id);
+        assert(tablet.id < _tablet_to_dc_replication_factor_map.size());
+        const auto& dc_rf_map = _tablet_to_dc_replication_factor_map[tablet.id];
         const auto dc_it = _datacenter_map.find(datacenter);
         assert(dc_it != _datacenter_map.end());
-        assert(dc_it->second < it->second.size());
-        return it->second[dc_it->second];
+        assert(dc_it->second < dc_rf_map.size());
+        return dc_rf_map[dc_it->second];
     }
 
     [[nodiscard]] size_t get_replication_factor(const dht::token id) const override {
-        const auto it = _replication_factor_map.find(id);
-        assert(it != _replication_factor_map.end());
-        const auto rf = std::accumulate(it->second.begin(), it->second.end(), 0);
+        tablet_logger.info("Get total rf for token {}", id);
+        auto tablet = get_tablet_map().get_tablet_id(id);
+        assert(tablet.id < _tablet_to_dc_replication_factor_map.size());
+        const auto& dc_rf_map = _tablet_to_dc_replication_factor_map[tablet.id];
+        const auto rf = std::accumulate(dc_rf_map.begin(), dc_rf_map.end(), 0);
         return rf;
     }
 
@@ -803,16 +813,14 @@ public:
         on_internal_error(tablet_logger, format("Invalid replica selector {}", static_cast<int>(info->writes)));
     }
 
-    virtual inet_address_vector_replica_set get_endpoints_for_reading(const token& search_token) const override {
-        auto&& tablets = get_tablet_map();
-        auto tablet = tablets.get_tablet_id(search_token);
+    const tablet_replica_set& get_endpoints_for_reading(const tablet_id tablet) const {
+        const auto& tablets = get_tablet_map();
         auto&& info = tablets.get_tablet_transition_info(tablet);
         tablet_logger.trace("_transitions = {}", tablets.has_transitions()?"yes":"no");
         auto&& replicas = std::invoke([&] () -> const tablet_replica_set& {
             if (!info) {
                 return tablets.get_tablet_info(tablet).replicas;
-            }
-            tablet_logger.trace("get_endpoints_for_reading  read_replica_set_selector = {}", (info->reads == read_replica_set_selector::previous? "previous":"next"));
+            }            
             switch (info->reads) {
                 case read_replica_set_selector::previous:
                     return tablets.get_tablet_info(tablet).replicas;
@@ -821,11 +829,18 @@ public:
                 }
             }
             on_internal_error(tablet_logger, format("Invalid replica selector {}", static_cast<int>(info->reads)));
-        });
+        });        
+        return replicas;
+    }
+
+    inet_address_vector_replica_set get_endpoints_for_reading(const token& search_token) const override {
+        auto&& tablets = get_tablet_map();
+        const auto tablet = tablets.get_tablet_id(search_token);
+        const auto& host_id_list = get_endpoints_for_reading(tablet);        
+        auto replicas = to_replica_set(host_id_list);
+        maybe_remove_node_being_replaced(*_tmptr, *_rs, replicas);
         tablet_logger.trace("get_endpoints_for_reading({}): table={}, tablet={}, replicas={}", search_token, _table, tablet, replicas);
-        auto result = to_replica_set(replicas);
-        maybe_remove_node_being_replaced(*_tmptr, *_rs, result);
-        return result;
+        return replicas;
     }
 
     std::optional<tablet_routing_info> check_locality(const token& search_token) const override {

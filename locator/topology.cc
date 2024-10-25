@@ -320,6 +320,7 @@ void topology::index_node(const node* node) {
     //    and their host_id is updated later on.
     if (node->host_id()) {
         auto [nit, inserted_host_id] = _nodes_by_host_id.emplace(node->host_id(), node);
+        tlogger.debug("topology[{}]: _nodes_by_host_id add host_id={}: {}", fmt::ptr(this), node->host_id(), node_printer(node));
         if (!inserted_host_id) {
             on_internal_error(tlogger, seastar::format("topology[{}]: {}: node already exists", fmt::ptr(this), node_printer(node)));
         }

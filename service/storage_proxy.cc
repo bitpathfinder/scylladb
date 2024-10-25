@@ -1564,12 +1564,14 @@ public:
         }
     }
     void no_targets() {
+        slogger.trace("No targets");
         // We don't have any live targets and we should complete the handler now.
         // Either we already stored sufficient hints to achieve CL and the handler
         // is completed successfully (see hint_to_dead_endpoints), or we don't achieve
         // CL because we didn't store sufficient hints and we don't have live targets,
         // so the handler is completed with error.
         if (!_cl_achieved) {
+            slogger.trace("No CL ");
             _error = error::FAILURE;
         }
         _proxy->remove_response_handler(_id);
@@ -3359,9 +3361,10 @@ storage_proxy::create_write_response_handler(const read_repair_mutation& mut, db
 
     slogger.trace("creating write handler for read repair token: {} endpoint: {}", mh->token(), endpoints);
     tracing::trace(tr_state, "Creating write handler for read repair token: {} endpoint: {}", mh->token(), endpoints);
+    const dht::token token_id = mh->token();
 
     // No rate limiting for read repair
-    return create_write_response_handler(std::move(mut.ermp), cl, type, std::move(mh), std::move(endpoints), inet_address_vector_topology_change(), inet_address_vector_topology_change(), std::move(tr_state), get_stats(), std::move(permit), std::monostate(), is_cancellable::no, mh->token());
+    return create_write_response_handler(std::move(mut.ermp), cl, type, std::move(mh), std::move(endpoints), inet_address_vector_topology_change(), inet_address_vector_topology_change(), std::move(tr_state), get_stats(), std::move(permit), std::monostate(), is_cancellable::no, token_id);
 }
 
 result<storage_proxy::response_id_type>
