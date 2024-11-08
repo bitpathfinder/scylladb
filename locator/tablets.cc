@@ -505,7 +505,7 @@ size_t tablet_map::external_memory_usage() const {
     size_t result = _tablets.external_memory_usage();
     for (auto&& tablet : _tablets) {
         //result += tablet.replicas.external_memory_usage();
-        result += tablet.replicas.capacity() * sizeof(tablet_replica);
+        result += (tablet.replicas.capacity() <= 8 ? 0 : tablet.replicas.capacity() * sizeof(tablet_replica));
     }
     return result;
 }
