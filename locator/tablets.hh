@@ -57,16 +57,20 @@ struct global_tablet_id {
 
     bool operator<=>(const global_tablet_id&) const = default;
 };
-
+#pragma pack(push, 1)
 struct tablet_replica {
     host_id host;
     uint16_t shard;
 
     bool operator==(const tablet_replica&) const = default;
 };
+#pragma pack(pop)
 
 //using tablet_replica_set = utils::small_vector<tablet_replica, 3>;
+
 using tablet_replica_set = absl::InlinedVector<tablet_replica, 3>;
+static_assert(sizeof(tablet_replica_set) == 64);
+static_assert(sizeof(tablet_replica) == 18);
 
 }
 
