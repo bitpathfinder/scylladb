@@ -27,6 +27,7 @@
 #include <seastar/util/noncopyable_function.hh>
 #include <seastar/coroutine/maybe_yield.hh>
 
+#include <absl/container/inlined_vector.h>
 namespace locator {
 
 class topology;
@@ -59,12 +60,13 @@ struct global_tablet_id {
 
 struct tablet_replica {
     host_id host;
-    shard_id shard;
+    uint16_t shard;
 
     bool operator==(const tablet_replica&) const = default;
 };
 
-using tablet_replica_set = utils::small_vector<tablet_replica, 3>;
+//using tablet_replica_set = utils::small_vector<tablet_replica, 3>;
+using tablet_replica_set = absl::InlinedVector<tablet_replica, 3>;
 
 }
 

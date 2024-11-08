@@ -504,7 +504,8 @@ tablet_transition_kind tablet_transition_kind_from_string(const sstring& name) {
 size_t tablet_map::external_memory_usage() const {
     size_t result = _tablets.external_memory_usage();
     for (auto&& tablet : _tablets) {
-        result += tablet.replicas.external_memory_usage();
+        //result += tablet.replicas.external_memory_usage();
+        result += tablet.replicas.capacity() * sizeof(tablet_replica);
     }
     return result;
 }
@@ -673,7 +674,8 @@ class tablet_effective_replication_map : public effective_replication_map {
 
 public:
     using replication_factor_index_t = uint16_t;
-    using replication_factor_list = utils::small_vector<replication_factor_index_t, 8>;
+    //using replication_factor_list = utils::small_vector<replication_factor_index_t, 8>;
+    using replication_factor_list = absl::InlinedVector<replication_factor_index_t, 8>;
 
 private:
 
