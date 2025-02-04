@@ -1104,6 +1104,7 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, shar
     co_await proxy.local().get_db().local().apply(freeze(mutations), db::no_timeout);
     co_await ap.update();
     co_await ap.commit();
+    ap.release_locks();
     co_await ap.notify();
     co_await ap.destroy();
 }

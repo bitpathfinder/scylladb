@@ -178,6 +178,10 @@ class schema_applier {
 
     future<schema_persisted_state> get_schema_persisted_state();
 public:
+    void release_locks() {
+        _affected_tables_and_views.locks = replica::tables_metadata_lock_on_all_shards{};
+    }
+
     schema_applier(
             sharded<service::storage_proxy>& proxy,
             sharded<db::system_keyspace>& sys_ks,
