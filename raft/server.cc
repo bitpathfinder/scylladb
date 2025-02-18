@@ -1444,6 +1444,7 @@ future<> server_impl::applier_fiber() {
             ), v);
 
             signal_applied();
+            logger.trace("[{}] applier fiber: applied entries up to {}", _id, _applied_idx);
         }
     } catch(stop_apply_fiber& ex) {
         // the fiber is aborted
@@ -1466,7 +1467,12 @@ future<> server_impl::wait_for_apply(index_t idx, abort_source* as) {
 
     check_not_aborted();
 
+
+
     if (idx > _applied_idx) {
+
+        logger.debug("[{}] Waiting for entry {} to be applied, last committed entry: {}, last applied entry: {}",
+                     _id, idx, _fsm->commit_idx(), _applied_idx);
         // The index is not applied yet. Wait for it.
         // This will be signalled when read_idx is applied
         auto it = _awaited_indexes.emplace(idx, awaited_index{{}, {}});
@@ -1481,6 +1487,7 @@ future<> server_impl::wait_for_apply(index_t idx, abort_source* as) {
             SCYLLA_ASSERT(it->second.abort);
         }
         co_await it->second.promise.get_future();
+        logger.debug("[{}]  Finished waiting for entry {} to be applied", _id, idx);
     }
 }
 

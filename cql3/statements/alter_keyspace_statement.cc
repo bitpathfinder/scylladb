@@ -188,6 +188,7 @@ std::map<sstring, sstring> get_old_options_flattened(const data_dictionary::keys
 
 future<std::tuple<::shared_ptr<cql_transport::event::schema_change>, cql3::cql_warnings_vec>>
 cql3::statements::alter_keyspace_statement::prepare_schema_mutations(query_processor& qp, service::query_state& state, const query_options& options, service::group0_batch& mc) const {
+    mylogger.debug("Preparing schema mutations for ALTER KEYSPACE {}, stack {}", _name, current_backtrace());
     using namespace cql_transport;
     try {
         event::schema_change::target_type target_type = event::schema_change::target_type::KEYSPACE;

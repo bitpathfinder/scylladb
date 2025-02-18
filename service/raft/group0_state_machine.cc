@@ -174,6 +174,7 @@ future<> group0_state_machine::reload_modules(modules_to_reload modules) {
 }
 
 future<> group0_state_machine::merge_and_apply(group0_state_machine_merger& merger) {
+    slogger.trace("merge_and_apply() is called");
     auto [_cmd, history] = merger.merge();
     auto cmd = std::move(_cmd);
 
@@ -198,16 +199,19 @@ future<> group0_state_machine::merge_and_apply(group0_state_machine_merger& merg
         _client.set_query_result(cmd.new_state_id, std::move(result));
     },
     [&] (topology_change& chng) -> future<> {
+        slogger.trace("merge_and_apply topology_change");
         auto tablet_keys = replica::get_tablet_metadata_change_hint(chng.mutations);
         co_await write_mutations_to_database(_sp, cmd.creator_addr, std::move(chng.mutations));
         co_await _ss.topology_transition({.tablets_hint = std::move(tablet_keys)});
     },
     [&] (mixed_change& chng) -> future<> {
+        slogger.trace("merge_and_apply mixed change");
         co_await _mm.merge_schema_from(locator::host_id{cmd.creator_id.uuid()}, std::move(chng.mutations));
         co_await _ss.topology_transition();
         co_return;
     },
     [&] (write_mutations& muts) -> future<> {
+        slogger.trace("merge_and_apply write_mutations");
         auto modules_to_reload = get_modules_to_reload(muts.mutations);
         co_await write_mutations_to_database(_sp, cmd.creator_addr, std::move(muts.mutations));
         co_await reload_modules(std::move(modules_to_reload));
@@ -257,6 +261,7 @@ future<> group0_state_machine::apply(std::vector<raft::command_cref> command) {
     co_await utils::get_local_injector().inject("group0_state_machine::delay_apply", 1s);
 
     auto read_apply_mutex_holder = co_await _client.hold_read_apply_mutex(_abort_source);
+    slogger.trace("hold_read_apply_mutex taken");
 
     // max_mutation_size = 1/2 of commitlog segment size, thus max_command_size is set 1/3 of commitlog segment size to leave space for metadata.
     size_t max_command_size = _sp.data_dictionary().get_config().commitlog_segment_size_in_mb() * 1024 * 1024 / 3;
@@ -307,6 +312,7 @@ future<> group0_state_machine::apply(std::vector<raft::command_cref> command) {
     }
 
     co_await _state_id_handler.advertise_state_id(m.last_id());
+    slogger.trace("apply() finished");
 }
 
 future<raft::snapshot_id> group0_state_machine::take_snapshot() {
@@ -318,10 +324,13 @@ void group0_state_machine::drop_snapshot(raft::snapshot_id id) {
 }
 
 future<> group0_state_machine::load_snapshot(raft::snapshot_id id) {
+    slogger.trace("load_snapshot snp id {}", id);
     // topology_state_load applies persisted state machine state into
     // memory and thus needs to be protected with apply mutex
     auto read_apply_mutex_holder = co_await _client.hold_read_apply_mutex(_abort_source);
+    slogger.trace("load_snapshot holding read_apply mutex, id {}", id);
     co_await _ss.topology_state_load();
+    slogger.trace("load_snapshot topology_state_load complete, unlocking CV. id {}", id);
     _ss._topology_state_machine.event.broadcast();
 }
 
@@ -394,6 +403,7 @@ future<> group0_state_machine::transfer_snapshot(raft::server_id from_id, raft::
     throw raft::request_aborted(fmt::format(
         "Abort requested while transferring snapshot from ID: {}, snapshot descriptor id: {}, snapshot index: {}", from_id, snp.id, snp.idx));
   }
+  slogger.trace("transfer snapshot finished");
 }
 
 future<> group0_state_machine::abort() {

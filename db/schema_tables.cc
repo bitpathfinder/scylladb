@@ -752,14 +752,14 @@ static thread_local semaphore the_merge_lock {1};
 
 future<> merge_lock() {
     if (slogger.is_enabled(log_level::trace)) {
-        slogger.trace("merge_lock at {}", current_backtrace());
+        slogger.trace("--- merge_lock at {}", current_backtrace());
     }
-    return smp::submit_to(0, [] { return the_merge_lock.wait(); });
+    return smp::submit_to(0, [] { auto val = the_merge_lock.wait(); slogger.trace("--- merge_lock locked at {}", current_backtrace()); return val; });
 }
 
 future<> merge_unlock() {
     if (slogger.is_enabled(log_level::trace)) {
-        slogger.trace("merge_unlock at {}", current_backtrace());
+        slogger.trace("--- merge_unlock at {}", current_backtrace());
     }
     return smp::submit_to(0, [] { the_merge_lock.signal(); });
 }
@@ -774,7 +774,9 @@ future<semaphore_units<>> hold_merge_lock() noexcept {
 }
 
 future<> with_merge_lock(noncopyable_function<future<> ()> func) {
+    slogger.trace("with_merge_lock at {}", __LINE__);
     co_await merge_lock();
+    slogger.trace("with_merge_lock Got lock {}", __LINE__);
     std::exception_ptr ep;
     try {
         co_await func();

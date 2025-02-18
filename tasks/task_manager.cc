@@ -217,6 +217,8 @@ void task_manager::task::impl::set_virtual_parent() noexcept {
 }
 
 void task_manager::task::impl::run_to_completion() {
+    tasks::tmlogger.debug("run_to_completion");
+
     (void)run().then([this] {
         _as.check();
         return finish();
@@ -311,6 +313,7 @@ future<> task_manager::task::add_child(foreign_task_ptr&& child) {
 }
 
 void task_manager::task::start() {
+    tmlogger.info("Starting task with id = {}", id());
     if (_impl->_status.state != task_state::created) {
         on_fatal_internal_error(tmlogger, seastar::format("{} task with id = {} was started twice", _impl->_module->get_name(), id()));
     }

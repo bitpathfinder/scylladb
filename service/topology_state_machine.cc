@@ -266,6 +266,7 @@ future<> topology_state_machine::await_not_busy() {
 future<sstring> topology_state_machine::wait_for_request_completion(db::system_keyspace& sys_ks, utils::UUID id, bool require_entry) {
     tsmlogger.debug("Start waiting for topology request completion (request id {})", id);
     while (true) {
+        tsmlogger.debug("waiting get_topology_request_state (request id {})", id);
         auto c = reload_count;
         auto [done, error] = co_await sys_ks.get_topology_request_state(id, require_entry);
         if (done) {
@@ -276,6 +277,7 @@ future<sstring> topology_state_machine::wait_for_request_completion(db::system_k
             // wait only if the state was not reloaded while we were preempted
             tsmlogger.debug("Waiting for a topology event while waiting for topology request completion (request id {})", id);
             co_await event.when();
+            tsmlogger.debug("----- got event, rechecking, request id {}", id);
         }
     }
 
