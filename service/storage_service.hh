@@ -316,9 +316,7 @@ public:
         return _erm_factory;
     }
 
-    token_metadata_ptr get_token_metadata_ptr() const noexcept {
-        return _shared_token_metadata.get();
-    }
+    token_metadata_ptr get_token_metadata_ptr() const noexcept;
 
     const locator::token_metadata& get_token_metadata() const noexcept {
         return *_shared_token_metadata.get();

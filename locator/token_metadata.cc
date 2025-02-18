@@ -283,6 +283,10 @@ public:
     void set_version_tracker(token_metadata::version_tracker_t tracker) {
         _version_tracker = std::move(tracker);
     }
+    
+    const token_metadata::version_tracker_t&  get_version_tracker() const {
+        return _version_tracker;
+    }
 
     friend class token_metadata;
 };
@@ -1127,19 +1131,26 @@ token_metadata::set_version_tracker(version_tracker_t tracker) {
 }
 
 version_tracker::~version_tracker() {
+    tlogger.debug(
+        "~version_tracker tracker {} ptr {} destroyed trace {}", fmt::ptr(this), fmt::ptr(tm_ptr), current_backtrace());
     if (_expired_at) {
         auto now = std::chrono::steady_clock::now();
         if (*_expired_at + _log_threshold < now) {
             auto d = std::chrono::duration_cast<std::chrono::duration<float>>(now - *_expired_at);
-            tlogger.warn("topology version {} held for {:.3f} [s] past expiry, released at: {}", _version, d.count(),
+            tlogger.warn("topology version {}, addr {} held for {:.3f} [s] past expiry, released at: {}", _version, fmt::ptr(tm_ptr), d.count(), 
                          seastar::current_backtrace());
         }
     }
 }
 
 version_tracker shared_token_metadata::new_tracker(token_metadata::version_t version) {
-    auto tracker = version_tracker(_versions_barrier.start(), version);
+    tlogger.debug(
+            "{} shared_token_metadata::new_tracker {}, use count {}  _versions_barrier {} trace {},", fmt::ptr(this), fmt::ptr(_shared.get()), _versions_barrier.operations_in_progress(),  fmt::ptr(&_versions_barrier), current_backtrace());
+    auto tracker = version_tracker(_versions_barrier.start(), version, _shared.get());
     _trackers.push_front(tracker);
+    tlogger.debug(
+        "{} shared_token_metadata::new_tracker {}, use count {}  _versions_barrier {} trackers {},", fmt::ptr(this), fmt::ptr(_shared.get()), _versions_barrier.operations_in_progress(),  fmt::ptr(&_versions_barrier), _trackers.size());
+    
     return tracker;
 }
 
@@ -1148,12 +1159,22 @@ void shared_token_metadata::set(mutable_token_metadata_ptr tmptr) noexcept {
         on_internal_error(tlogger, format("shared_token_metadata: must not set non-increasing ring_version: {} -> {}", _shared->get_ring_version(), tmptr->get_ring_version()));
     }
 
+    tlogger.debug("{} replacing token metadata {} to {}, version {} to {}, prev use count {}, phase {}", fmt::ptr(this), fmt::ptr(_shared.get()), fmt::ptr(tmptr.get()),
+            _shared->get_version(), tmptr->get_version(), _versions_barrier.operations_in_progress(), _versions_barrier.phase());
+
     if (_shared->get_version() > tmptr->get_version()) {
         on_internal_error(tlogger, format("shared_token_metadata: must not set decreasing version: {} -> {}", _shared->get_version(), tmptr->get_version()));
     } else if (_shared->get_version() < tmptr->get_version()) {
         _stale_versions_in_use = _versions_barrier.advance_and_await();
     }
 
+
+    tlogger.debug("{} after waiting, before replacing token metadata {} to {}, version {} to {}, prev use count {}, phase {}", fmt::ptr(this), fmt::ptr(_shared.get()), fmt::ptr(tmptr.get()),
+            _shared->get_version(), tmptr->get_version(), _versions_barrier.operations_in_progress(), _versions_barrier.phase());
+
+
+    //_clones.emplace_back(_shared->weak_from_this());
+    
     _shared = std::move(tmptr);
     _shared->set_version_tracker(new_tracker(_shared->get_version()));
 
@@ -1162,8 +1183,7 @@ void shared_token_metadata::set(mutable_token_metadata_ptr tmptr) noexcept {
             v.mark_expired(_stall_detector_threshold);
         }
     }
-
-    tlogger.debug("new token_metadata is set, version {}", _shared->get_version());
+    tlogger.debug("{} new token_metadata {} is set, version {}, use count {}, trackers {}", fmt::ptr(this), fmt::ptr(_shared.get()), _shared->get_version(), _versions_barrier.operations_in_progress(), _trackers.size());
 }
 
 void shared_token_metadata::update_fence_version(token_metadata::version_t version) {
@@ -1286,4 +1306,50 @@ gms::inet_address host_id_or_endpoint::resolve_endpoint(const gms::gossiper& g) 
     return *endpoint_opt;
 }
 
+shared_token_metadata::~shared_token_metadata() {
+    tlogger.debug("{} shared_token_metadata {} tracker {} destroyed trace {}", fmt::ptr(this), fmt::ptr(_shared.get()), fmt::ptr(&_shared->get_version_tracker()), current_backtrace());
+}
+version_tracker::version_tracker(utils::phased_barrier::operation op, service::topology::version_t version, void* ptr)
+    : _op(std::move(op))
+    , tm_ptr(ptr) 
+    , _version(version)
+    {
+        tlogger.debug(
+            "version_tracker::version_tracker {} ptr {} created trace {}", fmt::ptr(this), fmt::ptr(tm_ptr), current_backtrace());
+        
+}
+
+version_tracker& version_tracker::operator=(version_tracker&& rhs) noexcept  {
+    if (this != &rhs) {
+        _op = std::move(rhs._op);
+        _version = rhs._version;
+        _link = std::move(rhs._link);
+        tm_ptr = rhs.tm_ptr;
+        _expired_at = rhs._expired_at;
+        rhs._expired_at = std::nullopt;
+    }
+    tlogger.debug("version_tracker::operator= {} from {} ptr {} trace {}", fmt::ptr(this), fmt::ptr(&rhs), fmt::ptr(tm_ptr), current_backtrace());
+    return *this;
+}
+
+version_tracker::version_tracker(version_tracker&& rhs) noexcept : _op(std::move(rhs._op)), tm_ptr(rhs.tm_ptr), _version(rhs._version), _link(std::move(rhs._link)),_expired_at(std::move(rhs._expired_at)) {    
+    rhs._expired_at = std::nullopt;
+    tlogger.debug("version_tracker::version_tracker {} created from {}  ptr {} trace {}", fmt::ptr(this), fmt::ptr(&rhs), fmt::ptr(tm_ptr), current_backtrace());
+}
+seastar::future<> shared_token_metadata::stale_versions_in_use() const {    
+    tlogger.info("shared_token_metadata {} trackers number {}", fmt::ptr(this), _trackers.size());
+    for(auto& ptr : _clones) {
+        if (ptr) {
+            tlogger.info("shared_token_metadata still alive {} clone {}, tracker {} ", fmt::ptr(this), fmt::ptr(ptr.get()), fmt::ptr(&ptr->get_version_tracker()));
+        }
+    }    
+    for (auto&& v : _trackers) {
+        tlogger.info("shared_token_metadata {}, token_metadata {}, stale_versions_in_use tracker {} ", fmt::ptr(this), fmt::ptr(v.tm_ptr), fmt::ptr(&v));
+    }
+    tlogger.info("shared_token_metadata {} shared {} stale_versions_in_use  _versions_barrier op {} ", fmt::ptr(this), fmt::ptr(_shared.get()), _versions_barrier.operations_in_progress());
+    return _stale_versions_in_use.get_future();
+}
+const token_metadata::version_tracker_t& token_metadata::get_version_tracker() const {
+    return _impl->get_version_tracker();
+}
 } // namespace locator

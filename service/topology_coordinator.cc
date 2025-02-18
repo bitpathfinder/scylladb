@@ -1084,6 +1084,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             }).finally([this, g = _async_gate.hold(), gid, name] () noexcept {
                 rtlogger.debug("{} for tablet {} resolved.", name, gid);
                 _tablets_ready = true;
+                rtlogger.info("unlock _topo_sm {}:{}", __FILE__, __LINE__);
                 _topo_sm.event.broadcast();
             });
             return false;
@@ -1849,6 +1850,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
 
     // Returns `true` iff there was work to do.
     future<bool> handle_topology_transition(group0_guard guard) {
+        rtlogger.debug("handle_topology_transition()");
         auto tstate = _topo_sm._topology.tstate;
         if (!tstate) {
             // When adding a new source of work, make sure to update should_preempt_balancing() as well.
@@ -1898,6 +1900,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
         rtlogger.info("entered `{}` transition state", *tstate);
         switch (*tstate) {
             case topology::transition_state::join_group0: {
+                rtlogger.debug("transition_state::join_group0");
                     auto node = get_node_to_work_on(std::move(guard));
                     if (node.rs->state == node_state::replacing) {
                         // Make sure all nodes are no longer trying to write to a node being replaced. This is important
@@ -1942,6 +1945,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
 
                 switch (node.rs->state) {
                     case node_state::bootstrapping: {
+                        rtlogger.debug("transition_state::join_group0, node_state::bootstrapping {}", node.id);
                         SCYLLA_ASSERT(!node.rs->ring);
                         auto num_tokens = std::get<join_param>(node.req_param.value()).num_tokens;
                         auto tokens_string = std::get<join_param>(node.req_param.value()).tokens_string;
@@ -1984,6 +1988,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                         co_await update_topology_state(std::move(guard_), {std::move(mutation), builder.build()}, reason);
 
                         co_await utils::get_local_injector().inject("topology_coordinator_pause_after_updating_cdc_generation", utils::wait_for_message(5min));
+                        rtlogger.debug("Finished transition_state::join_group0, node_state::bootstrapping {}", node.id);
                     }
                         break;
                     case node_state::replacing: {
@@ -2128,6 +2133,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 }
                 break;
             case topology::transition_state::write_both_read_old: {
+                rtlogger.debug("transition_state::write_both_read_old");
                 auto node = get_node_to_work_on(std::move(guard));
 
                 // make sure all nodes know about new topology (we require all nodes to be alive for topo change for now)
@@ -2218,10 +2224,12 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             }
                 break;
             case topology::transition_state::write_both_read_new: {
+                rtlogger.debug("transition_state::write_both_read_new");
                 while (utils::get_local_injector().enter("topology_coordinator_pause_after_streaming")) {
                     co_await sleep_abortable(std::chrono::milliseconds(10), _as);
                 }
                 auto node = get_node_to_work_on(std::move(guard));
+                rtlogger.debug("transition_state::write_both_read_new node {}", node.id);
                 bool barrier_failed = false;
                 // In this state writes goes to old and new replicas but reads start to be done from new replicas
                 // Before we stop writing to old replicas we need to wait for all previous reads to complete
@@ -2250,6 +2258,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 rtbuilder.done();
                 switch(node.rs->state) {
                 case node_state::bootstrapping: {
+                    rtlogger.debug("transition_state::write_both_read_new: node_state::bootstrapping {} ", node.id);
                     co_await utils::get_local_injector().inject("delay_node_bootstrap", [](auto& handler) {
                         rtlogger.info("delay_node_bootstrap: waiting for message");
                         return handler.wait_for_message(db::timeout_clock::now() + std::chrono::minutes(5));
@@ -2268,6 +2277,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                     }
                     break;
                 case node_state::removing: {
+                    rtlogger.debug("transition_state::write_both_read_new: node_state::removing {} ", node.id);
                     co_await utils::get_local_injector().inject("delay_node_removal", [](auto& handler) {
                         rtlogger.info("delay_node_removal: waiting for message");
                         return handler.wait_for_message(db::timeout_clock::now() + std::chrono::minutes(5));
@@ -2276,6 +2286,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 }
                     [[fallthrough]];
                 case node_state::decommissioning: {
+                    rtlogger.debug("transition_state::write_both_read_new: node_state::decommissioning {} ", node.id);
                     topology_mutation_builder builder(node.guard.write_timestamp());
                     node_state next_state;
                     std::vector<canonical_mutation> muts;
@@ -2300,6 +2311,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                 }
                     break;
                 case node_state::replacing: {
+                    rtlogger.debug("transition_state::write_both_read_new: node_state::replacing {} ", node.id);
                     auto replaced_node_id = parse_replaced_node(node.req_param);
                     node = retake_node(co_await remove_from_group0(std::move(node.guard), replaced_node_id), node.id);
 
@@ -2336,12 +2348,17 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             }
                 break;
             case topology::transition_state::tablet_migration:
+            {
+                rtlogger.debug("transition_state::tablet_migration");
                 co_await handle_tablet_migration(std::move(guard), false);
+            }
                 break;
+
             case topology::transition_state::tablet_resize_finalization:
                 co_await handle_tablet_resize_finalization(std::move(guard));
                 break;
             case topology::transition_state::left_token_ring: {
+                rtlogger.debug("transition_state::left_token_ring");
                 auto node = get_node_to_work_on(std::move(guard));
 
                 if (node.id == _raft.id()) {
@@ -2562,6 +2579,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
             }
             [[fallthrough]];
             case node_state::normal: {
+                rtlogger.debug("state is normal, checking for node requests");
                 // if the state is none there have to be either 'join' or 'replace' request
                 // if the state is normal there have to be either 'leave', 'remove' or 'rebuild' request
                 topology_mutation_builder builder(node.guard.write_timestamp());
@@ -2699,6 +2717,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
     // Returns the retaken node and information on whether responding to the
     // join request succeeded.
     future<std::tuple<node_to_work_on, bool>> finish_accepting_node(node_to_work_on&& node) {
+        rtlogger.info("finishing accepting node {}", node.id);
         if (_topo_sm._topology.normal_nodes.empty()) {
             // This is the first node, it joins without the handshake.
             co_return std::tuple{std::move(node), true};
@@ -2725,6 +2744,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber {
                          "The node may hang. It's safe to shut it down manually now. Error: {}",
                          node.id, e.what());
         }
+        rtlogger.info("finished accepting node {}", id);
 
         co_return std::tuple{retake_node(co_await start_operation(), id), responded};
     }
@@ -2838,8 +2858,14 @@ public:
 
     virtual void on_join_cluster(const gms::inet_address& endpoint) {}
     virtual void on_leave_cluster(const gms::inet_address& endpoint, const locator::host_id& hid) {};
-    virtual void on_up(const gms::inet_address& endpoint) { _topo_sm.event.broadcast(); };
-    virtual void on_down(const gms::inet_address& endpoint) { _topo_sm.event.broadcast(); };
+    virtual void on_up(const gms::inet_address& endpoint) {
+        rtlogger.info("unlock _topo_sm {}:{}", __FILE__, __LINE__);
+        _topo_sm.event.broadcast();
+    };
+    virtual void on_down(const gms::inet_address& endpoint) {
+        rtlogger.info("unlock _topo_sm {}:{}", __FILE__, __LINE__);
+        _topo_sm.event.broadcast();
+    };
 };
 
 future<std::optional<group0_guard>> topology_coordinator::maybe_migrate_system_tables(group0_guard guard) {
@@ -3291,6 +3317,7 @@ future<bool> topology_coordinator::maybe_run_upgrade() {
     rtlogger.info("topology coordinator fiber is upgrading the cluster to raft topology mode");
 
     auto abort = _as.subscribe([this] () noexcept {
+        rtlogger.info("unlock _topo_sm {}:{}", __FILE__, __LINE__);
         _topo_sm.event.broadcast();
     });
 
@@ -3316,9 +3343,13 @@ future<bool> topology_coordinator::maybe_run_upgrade() {
 }
 
 future<> topology_coordinator::run() {
+    rtlogger.info("topology_coordinator::run()", __FILE__, __LINE__);
     auto abort = _as.subscribe([this] () noexcept {
+        rtlogger.info("unlock _topo_sm {}:{}", __FILE__, __LINE__);
         _topo_sm.event.broadcast();
     });
+
+    rtlogger.info("topology_coordinator::run()", __FILE__, __LINE__);
 
     co_await fence_previous_coordinator();
     auto cdc_generation_publisher = cdc_generation_publisher_fiber();

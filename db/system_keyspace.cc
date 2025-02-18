@@ -3073,6 +3073,7 @@ future<service::topology> system_keyspace::load_topology_state(const std::unorde
 
         if (row.has("topology_request")) {
             auto req = service::topology_request_from_string(row.get_as<sstring>("topology_request"));
+            slogger.info("topology request: {} ", row.get_as<sstring>("topology_request"));
             ret.requests.emplace(host_id, req);
             switch(req) {
             case service::topology_request::replace:
@@ -3367,6 +3368,7 @@ future<> system_keyspace::sstables_registry_list(table_id owner, sstable_registr
 }
 
 future<service::topology_request_state> system_keyspace::get_topology_request_state(utils::UUID id, bool require_entry) {
+    slogger.trace("get_topology_request_state: id={}, require_entry={}", id, (int)require_entry);
     auto rs = co_await execute_cql(
         format("SELECT done, error FROM system.{} WHERE id = {}", TOPOLOGY_REQUESTS, id));
     if (!rs || rs->empty()) {

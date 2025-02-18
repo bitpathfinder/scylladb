@@ -730,7 +730,9 @@ future<> storage_service::topology_state_load(state_change_hint hint) {
 
     auto saved_tmpr = get_token_metadata_ptr();
     {
+        rtlogger.debug("reload raft topology state get_token_metadata_lock {}", __LINE__);
         auto tmlock = co_await get_token_metadata_lock();
+        rtlogger.debug("reload raft topology state lock taken {}", __LINE__);
         auto tmptr = make_token_metadata_ptr(token_metadata::config {
             get_token_metadata().get_topology().get_config()
         });
@@ -820,9 +822,10 @@ future<> storage_service::topology_state_load(state_change_hint hint) {
 }
 
 future<> storage_service::topology_transition(state_change_hint hint) {
+    slogger.info("topology_transition...");
     SCYLLA_ASSERT(this_shard_id() == 0);
     co_await topology_state_load(std::move(hint)); // reload new state
-
+    rtlogger.info("unlock _topo_sm {}:{}", __FILE__, __LINE__);
     _topology_state_machine.event.broadcast();
 }
 
@@ -836,6 +839,7 @@ future<> storage_service::reload_raft_topology_state(service::raft_group0_client
 }
 
 future<> storage_service::merge_topology_snapshot(raft_snapshot snp) {
+    slogger.trace("merge_topology_snapshot");
     auto it = std::partition(snp.mutations.begin(), snp.mutations.end(), [] (const canonical_mutation& m) {
         return m.column_family_id() != db::system_keyspace::cdc_generations_v3()->id();
     });
@@ -881,7 +885,9 @@ future<> storage_service::merge_topology_snapshot(raft_snapshot snp) {
         auto s = _db.local().find_schema(m.column_family_id());
         return m.to_mutation(s);
     });
+
     co_await _db.local().apply(freeze(muts), db::no_timeout);
+    slogger.trace("Applied {} mutations", muts.size());
 }
 
 future<> storage_service::update_service_levels_cache(qos::update_both_cache_levels update_only_effective_cache, qos::query_context ctx) {
@@ -1115,6 +1121,7 @@ future<> storage_service::sstable_cleanup_fiber(raft::server& server, gate::hold
 
 future<> storage_service::raft_state_monitor_fiber(raft::server& raft, gate::holder group0_holder) {
     std::optional<abort_source> as;
+    rtlogger.info("raft_state_monitor_fiber start");
 
     try {
         while (!_group0_as.abort_requested()) {
@@ -1252,10 +1259,11 @@ public:
         });
         auto result = co_await ser::join_node_rpc_verbs::send_join_node_request(
                 &_ss._messaging.local(), netw::msg_addr(g0_info.ip_addr), g0_info.id, _req);
+        rtlogger.info("join: the join request to {} is sent req id {}", g0_info.ip_addr, _req.request_id);
         std::visit(overloaded_functor {
             [this] (const join_node_request_result::ok&) {
-                rtlogger.info("join: request to join placed, waiting"
-                             " for the response from the topology coordinator");
+                rtlogger.info("join: request {} to join placed, waiting"
+                             " for the response from the topology coordinator", _req.request_id);
 
                 if (utils::get_local_injector().enter("pre_server_start_drop_expiring")) {
                     _ss._gossiper.get_mutable_address_map().force_drop_expiring_entries();
@@ -1268,6 +1276,8 @@ public:
                         format("the topology coordinator rejected request to join the cluster: {}", rej.reason));
             },
         }, result.result);
+
+        rtlogger.info("join: {} done", g0_info.ip_addr);
 
         co_return;
     }
@@ -1839,8 +1849,12 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
 
         // Need to start system_distributed_keyspace before bootstrap because bootstrapping
         // process may access those tables.
-        supervisor::notify("starting system distributed keyspace");
+        supervisor::notify("starting system distributed keyspace_1");
+
         co_await _sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start);
+
+
+        slogger.warn("starting, bootstrap_complete {}:{} ", __FILE__, __LINE__);
 
         if (_sys_ks.local().bootstrap_complete()) {
             if (_topology_state_machine._topology.left_nodes.contains(raft_server->id())) {
@@ -1850,28 +1864,39 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
             if (!_db.local().get_config().join_ring() && !_feature_service.zero_token_nodes) {
                 throw std::runtime_error("Cannot boot a node with join_ring=false because the cluster does not support the ZERO_TOKEN_NODES feature");
             }
+            slogger.warn("join ring {}:{} ", __FILE__, __LINE__);
 
-            auto err = co_await wait_for_topology_request_completion(join_params.request_id);
+            auto err = co_await wait_for_topology_request_completion(join_params.request_id); // HERE WE HANG
+            slogger.warn("join ring {}:{} ", __FILE__, __LINE__);
             if (!err.empty()) {
                 throw std::runtime_error(fmt::format("{} failed. See earlier errors ({})", raft_replace_info ? "Replace" : "Bootstrap", err));
             }
 
             if (raft_replace_info) {
+                slogger.warn("raft_replace_info {}:{} ", __FILE__, __LINE__);
                 co_await await_tablets_rebuilt(raft_replace_info->raft_id);
             }
         }
+
+        slogger.warn("starting, bootstrap_complete {}:{} ", __FILE__, __LINE__);
 
         // If we were the first node in the cluster, at this point `upgrade_state` will be
         // initialized properly. Yield control to group 0
         _manage_topology_change_kind_from_group0 = true;
         set_topology_change_kind(upgrade_state_to_topology_op_kind(_topology_state_machine._topology.upgrade_state));
 
+        slogger.warn("starting, bootstrap_complete {}:{} ", __FILE__, __LINE__);
+
         co_await update_topology_with_local_metadata(*raft_server);
+
+        slogger.warn("starting, bootstrap_complete {}:{} ", __FILE__, __LINE__);
 
         // Node state is enough to know that bootstrap has completed, but to make legacy code happy
         // let it know that the bootstrap is completed as well
         co_await _sys_ks.local().set_bootstrap_state(db::system_keyspace::bootstrap_state::COMPLETED);
         set_mode(mode::NORMAL);
+
+        slogger.warn("starting, bootstrap_complete {}:{} ", __FILE__, __LINE__);
 
         utils::get_local_injector().inject("stop_after_setting_mode_to_normal_raft_topology",
             [] { std::raise(SIGSTOP); });
@@ -1881,11 +1906,15 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
             slogger.error("{}", err);
             throw std::runtime_error(err);
         }
+        slogger.warn("starting, bootstrap_complete {}:{} ", __FILE__, __LINE__);
 
         co_await _group0->finish_setup_after_join(*this, _qp, _migration_manager.local(), true);
 
+        slogger.warn("starting, bootstrap_complete {}:{} ", __FILE__, __LINE__);
+
         // Initializes monitor only after updating local topology.
         start_tablet_split_monitor();
+        slogger.warn("starting, bootstrap_complete {}:{} ", __FILE__, __LINE__);
 
         auto ids = _topology_state_machine._topology.normal_nodes |
                    std::views::keys |
@@ -1893,6 +1922,10 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
                    std::ranges::to<std::unordered_set<locator::host_id>>();
 
         co_await _gossiper.notify_nodes_on_up(std::move(ids));
+
+        slogger.warn("starting, bootstrap_complete {}:{} ", __FILE__, __LINE__);
+
+
 
         co_return;
     }
@@ -1971,8 +2004,11 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
         co_await _sys_ks.local().update_tokens(bootstrap_tokens);
         co_await bootstrap(bootstrap_tokens, cdc_gen_id, ri);
     } else {
-        supervisor::notify("starting system distributed keyspace");
+        supervisor::notify("starting system distributed keyspace _2 ");
+        slogger.warn("starting_2,  {}:{} ", __FILE__, __LINE__);
         co_await _sys_dist_ks.invoke_on_all(&db::system_distributed_keyspace::start);
+
+        slogger.warn("starting_2,  {}:{} ", __FILE__, __LINE__);
         bootstrap_tokens = co_await _sys_ks.local().get_saved_tokens();
         if (bootstrap_tokens.empty()) {
             bootstrap_tokens = boot_strapper::get_bootstrap_tokens(get_token_metadata_ptr(), _db.local().get_config(), dht::check_token_endpoint::no);
@@ -1985,6 +2021,7 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
                 slogger.info("Using saved tokens {}", bootstrap_tokens);
             }
         }
+        slogger.warn("starting_2,  {}:{} ", __FILE__, __LINE__);
     }
 
     slogger.debug("Setting tokens to {}", bootstrap_tokens);
@@ -2037,6 +2074,8 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
         slogger.info("Workload prioritization v1 is already started.");
     }
 
+    slogger.warn("continue starting {}:{} ", __FILE__, __LINE__);
+
     if (!cdc_gen_id) {
         // If we didn't observe any CDC generation at this point, then either
         // 1. we're replacing a node,
@@ -2063,6 +2102,7 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
             }
         }
     }
+    slogger.warn("continue starting {}:{} ", __FILE__, __LINE__);
 
     // Persist the CDC streams timestamp before we persist bootstrap_state = COMPLETED.
     if (cdc_gen_id) {
@@ -2074,6 +2114,8 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
     co_await _sys_ks.local().set_bootstrap_state(db::system_keyspace::bootstrap_state::COMPLETED);
     // At this point our local tokens and CDC streams timestamp are chosen (bootstrap_tokens, cdc_gen_id) and will not be changed.
 
+    slogger.warn("continue starting {}:{} ", __FILE__, __LINE__);
+
     // start participating in the ring.
     co_await set_gossip_tokens(_gossiper, bootstrap_tokens, cdc_gen_id);
 
@@ -2084,6 +2126,8 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
         slogger.error("{}", err);
         throw std::runtime_error(err);
     }
+
+    slogger.warn("continue starting {}:{} ", __FILE__, __LINE__);
 
     SCYLLA_ASSERT(_group0);
     co_await _group0->finish_setup_after_join(*this, _qp, _migration_manager.local(), false);
@@ -2098,6 +2142,7 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
         }
         // Other errors are handled internally by track_upgrade_progress_to_topology_coordinator
     })(*this, proxy);
+    slogger.warn("continue starting {}:{} ", __FILE__, __LINE__);
 
     std::unordered_set<locator::host_id> ids;
     _gossiper.for_each_endpoint_state([this, &ids] (const inet_address& addr, const gms::endpoint_state& ep) {
@@ -2106,7 +2151,10 @@ future<> storage_service::join_topology(sharded<service::storage_proxy>& proxy,
         }
     });
 
+    slogger.warn("continue starting {}:{} ", __FILE__, __LINE__);
+
     co_await _gossiper.notify_nodes_on_up(std::move(ids));
+    slogger.warn("finish starting {}:{} ", __FILE__, __LINE__);
 }
 
 future<> storage_service::track_upgrade_progress_to_topology_coordinator(sharded<service::storage_proxy>& proxy) {
@@ -3081,10 +3129,12 @@ future<> storage_service::join_cluster(sharded<service::storage_proxy>& proxy,
             std::move(loaded_endpoints), std::move(loaded_peer_features), get_ring_delay(), start_hm, new_generation);
 }
 
-future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmptr) noexcept {
+future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmptr_) noexcept {
     SCYLLA_ASSERT(this_shard_id() == 0);
 
-    slogger.debug("Replicating token_metadata to all cores");
+    const auto addr = tmptr_.get();
+
+    slogger.debug("Replicating token_metadata to all cores {}, use count {} trace {}", fmt::ptr(addr), tmptr_.use_count(), current_backtrace());
     std::exception_ptr ex;
 
     std::vector<mutable_token_metadata_ptr> pending_token_metadata_ptr;
@@ -3105,7 +3155,7 @@ future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmpt
             open_sessions.insert(session);
         }
 
-        for (auto&& [table_id, tmap]: tmptr->tablets().all_tables()) {
+        for (auto&& [table_id, tmap]: tmptr_->tablets().all_tables()) {
             for (auto&& [tid, trinfo]: tmap->transitions()) {
                 if (trinfo.session_id) {
                     auto id = session_id(trinfo.session_id);
@@ -3117,9 +3167,9 @@ future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmpt
 
     try {
         auto base_shard = this_shard_id();
-        pending_token_metadata_ptr[base_shard] = tmptr;
+        pending_token_metadata_ptr[base_shard] = tmptr_;
         // clone a local copy of updated token_metadata on all other shards
-        co_await smp::invoke_on_others(base_shard, [&, tmptr] () -> future<> {
+        co_await smp::invoke_on_others(base_shard, [&, tmptr = tmptr_] () -> future<> {
             pending_token_metadata_ptr[this_shard_id()] = make_token_metadata_ptr(co_await tmptr->clone_async());
         });
 
@@ -3136,7 +3186,7 @@ future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmpt
             if (rs->is_per_table()) {
                 continue;
             }
-            auto erm = co_await get_erm_factory().create_effective_replication_map(rs, tmptr);
+            auto erm = co_await get_erm_factory().create_effective_replication_map(rs, tmptr_);
             pending_effective_replication_maps[base_shard].emplace(ks_name, std::move(erm));
         }
         co_await container().invoke_on_others([&] (storage_service& ss) -> future<> {
@@ -3177,6 +3227,7 @@ future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmpt
 
     // Rollback on metadata replication error
     if (ex) {
+        slogger.error("Failed to replicate token_metadata to all cores: {}. Rolling back.", std::current_exception());
         try {
             co_await smp::invoke_on_all([&] () -> future<> {
                 auto tmptr = std::move(pending_token_metadata_ptr[this_shard_id()]);
@@ -3199,6 +3250,7 @@ future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmpt
     // Apply changes on all shards
     try {
         co_await container().invoke_on_all([&] (storage_service& ss) -> future<> {
+            slogger.debug("Replicating token_metadata to all cores: applying changes on shard {}", this_shard_id());
             ss._shared_token_metadata.set(std::move(pending_token_metadata_ptr[this_shard_id()]));
             auto& db = ss._db.local();
 
@@ -3251,6 +3303,7 @@ future<> storage_service::replicate_to_all_cores(mutable_token_metadata_ptr tmpt
         slogger.error("Failed to apply token_metadata changes: {}. Aborting.", std::current_exception());
         abort();
     }
+    slogger.debug("Finished replicating token_metadata to all cores {}, use count {}", fmt::ptr(addr), tmptr_.use_count());
 }
 
 future<> storage_service::stop() {
@@ -3916,6 +3969,7 @@ future<> storage_service::decommission() {
 
 // Runs inside seastar::async context
 void storage_service::run_bootstrap_ops(std::unordered_set<token>& bootstrap_tokens) {
+    slogger.info("bootstrap: starts");
     node_ops_ctl ctl(*this, node_ops_cmd::bootstrap_prepare, get_token_metadata().get_my_id(), get_broadcast_address());
     auto stop_ctl = deferred_stop(ctl);
     const auto& uuid = ctl.uuid();
@@ -3977,6 +4031,7 @@ void storage_service::run_bootstrap_ops(std::unordered_set<token>& bootstrap_tok
     } catch (...) {
         ctl.abort_on_error(node_ops_cmd::bootstrap_abort, std::current_exception()).get();
     }
+    slogger.info("bootstrap: done");
 }
 
 // Runs inside seastar::async context
@@ -5315,6 +5370,7 @@ std::chrono::milliseconds storage_service::get_ring_delay() {
 }
 
 future<locator::token_metadata_lock> storage_service::get_token_metadata_lock() noexcept {
+    slogger.debug("get_token_metadata_lock trace {}", current_backtrace());
     SCYLLA_ASSERT(this_shard_id() == 0);
     return _shared_token_metadata.get_lock();
 }
@@ -5343,6 +5399,7 @@ future<> storage_service::mutate_token_metadata(std::function<future<> (mutable_
 
 future<> storage_service::update_topology_change_info(mutable_token_metadata_ptr tmptr, sstring reason) {
     SCYLLA_ASSERT(this_shard_id() == 0);
+    slogger.info("storage_service::update_topology_change_info: mutable_token_metadata_ptr {}, use count {}", fmt::ptr(tmptr.get()), tmptr.use_count());
 
     try {
         locator::dc_rack_fn get_dc_rack_by_host_id([this, &tm = *tmptr] (locator::host_id host_id) -> std::optional<locator::endpoint_dc_rack> {
@@ -5366,6 +5423,7 @@ future<> storage_service::update_topology_change_info(mutable_token_metadata_ptr
         slogger.error("Failed to update topology change info for {}: {}", reason, ep);
         std::rethrow_exception(std::move(ep));
     }
+    slogger.info("finished storage_service::update_topology_change_info: mutable_token_metadata_ptr {}, use count {}", fmt::ptr(tmptr.get()), tmptr.use_count());
 }
 
 future<> storage_service::update_topology_change_info(sstring reason, acquire_merge_lock acquire_merge_lock) {
@@ -5389,30 +5447,42 @@ future<> storage_service::keyspace_changed(const sstring& ks_name) {
 }
 
 future<locator::mutable_token_metadata_ptr> storage_service::prepare_tablet_metadata(const locator::tablet_metadata_change_hint& hint) {
+    slogger.info("prepare_tablet_metadata");
     SCYLLA_ASSERT(this_shard_id() == 0);
+    rtlogger.info("prepare_tablet_metadata  {}:{}", __FILE__, __LINE__);
     auto tmptr = co_await get_mutable_token_metadata_ptr();
     if (hint) {
+        rtlogger.info("prepare_tablet_metadata  {}:{}", __FILE__, __LINE__);
         co_await replica::update_tablet_metadata(_db.local(), _qp, tmptr->tablets(), hint);
     } else {
+        rtlogger.info("prepare_tablet_metadata  {}:{}", __FILE__, __LINE__);
         tmptr->set_tablets(co_await replica::read_tablet_metadata(_qp));
     }
+    rtlogger.info("prepare_tablet_metadata  {}:{}", __FILE__, __LINE__);
     tmptr->tablets().set_balancing_enabled(_topology_state_machine._topology.tablet_balancing_enabled);
-    co_return tmptr;
+    rtlogger.info("prepare_tablet_metadata  {}:{}", __FILE__, __LINE__);
+    co_return std::move(tmptr);
 }
 
 future<> storage_service::commit_tablet_metadata(locator::mutable_token_metadata_ptr tmptr, const wake_up_load_balancer wake_up) {
+    slogger.debug("commit_tablet_metadata replicate_to_all_cores {}, use count {}", fmt::ptr(tmptr.get()), tmptr.use_count());
     co_await replicate_to_all_cores(std::move(tmptr));
+    rtlogger.info("commit_tablet_metadata  {}:{}", __FILE__, __LINE__);
     if (wake_up) {
+        rtlogger.info("unlock _topo_sm {}:{}", __FILE__, __LINE__);
         _topology_state_machine.event.broadcast();
     }
 }
 
 future<> storage_service::update_tablet_metadata(const locator::tablet_metadata_change_hint& hint, const wake_up_load_balancer wake_up) {
+    rtlogger.info("update_tablet_metadata  {}:{}", __FILE__, __LINE__);
+    auto tmptr = co_await prepare_tablet_metadata(hint);
     co_await commit_tablet_metadata(
-            co_await prepare_tablet_metadata(hint), wake_up);
+            std::move(tmptr), wake_up);
 }
 
 void storage_service::on_update_tablet_metadata(const locator::tablet_metadata_change_hint& hint) {
+    rtlogger.info("on_update_tablet_metadata  {}:{}", __FILE__, __LINE__);
     if (this_shard_id() != 0) {
         return;
     }
@@ -5608,6 +5678,7 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(raft
                         }
                     }
                 }
+
                 co_await container().invoke_on_all([version] (storage_service& ss) -> future<> {
                     const auto current_version = ss._shared_token_metadata.get()->get_version();
                     rtlogger.debug("Got raft_topology_cmd::barrier_and_drain, version {}, current version {}",
@@ -5621,15 +5692,18 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(raft
                     // exception. By returning exception we aim
                     // to reveal any other conditions where this may arise.
                     if (current_version != version) {
+                        rtlogger.debug("raft_topology_cmd::barrier_and_drain current_version != version line {}", __LINE__);
                         co_await coroutine::return_exception(std::runtime_error(
                             ::format("raft topology: command::barrier_and_drain, the version has changed, "
                                      "version {}, current_version {}, the topology change coordinator "
                                      " had probably migrated to another node",
                                 version, current_version)));
                     }
-
+                    rtlogger.debug("raft_topology_cmd::barrier_and_drain line {} metadata ptr {} ", __LINE__, fmt::ptr(ss._shared_token_metadata.get().get()));
                     co_await ss._shared_token_metadata.stale_versions_in_use();
+                    rtlogger.debug("raft_topology_cmd::barrier_and_drain line {}", __LINE__);
                     co_await get_topology_session_manager().drain_closing_sessions();
+                    rtlogger.debug("raft_topology_cmd::barrier_and_drain line {}", __LINE__);
 
                     rtlogger.debug("raft_topology_cmd::barrier_and_drain done");
                 });
@@ -5654,6 +5728,7 @@ future<raft_topology_cmd_result> storage_service::raft_topology_cmd_handler(raft
             }
             break;
             case raft_topology_cmd::command::stream_ranges: {
+                rtlogger.warn("raft_topology_cmd::stream_ranges is called");
                 co_await with_scheduling_group(_db.local().get_streaming_scheduling_group(), coroutine::lambda([&] () -> future<> {
                     const auto rs = _topology_state_machine._topology.find(id)->second;
                     auto tstate = _topology_state_machine._topology.tstate;
@@ -6594,10 +6669,12 @@ future<locator::load_stats> storage_service::load_stats_for_tablet_based_tables(
         co_return std::move(ids);
     });
 
+    slogger.debug("load_stats_for_tablet_based_tables taking get_token_metadata_lock lock ");
     // Helps with intra-node migration by serializing with changes to token metadata, so shards
     // participating in the migration will see migration in same stage, therefore preventing
     // double accounting (anomaly) in the reported size.
     auto tmlock = co_await get_token_metadata_lock();
+    slogger.debug("load_stats_for_tablet_based_tables got get_token_metadata_lock lock");
 
     // Each node combines a per-table load map from all of its shards and returns it to the coordinator.
     // So if there are 1k nodes, there will be 1k RPCs in total.
@@ -6749,7 +6826,7 @@ future<> storage_service::await_topology_quiesced() {
 
 future<join_node_request_result> storage_service::join_node_request_handler(join_node_request_params params) {
     join_node_request_result result;
-    rtlogger.info("received request to join from host_id: {}", params.host_id);
+    rtlogger.info("received request to join from host_id: {} id {}", params.host_id, params.request_id);
 
     // Sanity check. We should already be using raft topology changes because
     // the node asked us via join_node_query about which node to use and
@@ -6943,7 +7020,7 @@ future<join_node_request_result> storage_service::join_node_request_handler(join
         }
     }
 
-    rtlogger.info("placed join request for {}", params.host_id);
+    rtlogger.info("placed join request for {} id {}", params.host_id, params.request_id);
 
     // Success
     result.result = join_node_request_result::ok {};
@@ -6951,6 +7028,11 @@ future<join_node_request_result> storage_service::join_node_request_handler(join
 }
 
 future<join_node_response_result> storage_service::join_node_response_handler(join_node_response_params params) {
+    const std::string resp = std::visit(overloaded_functor {
+        [] (const join_node_response_params::accepted&) { return "accepted"; },
+        [] (const join_node_response_params::rejected&) { return "rejected"; },
+    }, params.response);
+    rtlogger.info("join_node_response_handler {} ", resp);
     SCYLLA_ASSERT(this_shard_id() == 0);
 
     // Usually this handler will only run once, but there are some cases where we might get more than one RPC,
@@ -6988,8 +7070,10 @@ future<join_node_response_result> storage_service::join_node_response_handler(jo
             [&] (const join_node_response_params::accepted& acc) -> future<join_node_response_result> {
                 co_await utils::get_local_injector().inject("join-node-response_handler-before-read-barrier", utils::wait_for_message(5min));
 
+                rtlogger.info(" join_node_response_params::accepted, getting read barrier");
+
                 // Do a read barrier to read/initialize the topology state
-                co_await _group0->group0_server_with_timeouts().read_barrier(&_group0_as, raft_timeout{});
+                co_await _group0->group0_server_with_timeouts().read_barrier(&_group0_as, raft_timeout{.loc = {}, .value = (lowres_clock::time_point::clock::now() + std::chrono::seconds(100))});
 
                 // Calculate nodes to ignore
                 // TODO: ignore_dead_nodes setting for bootstrap
@@ -7021,6 +7105,7 @@ future<join_node_response_result> storage_service::join_node_response_handler(jo
                 // Unblock waiting join_node_rpc_handshaker::post_server_start,
                 // which will start the raft server and continue
                 _join_node_response_done.set_value();
+                rtlogger.info("_join_node_response_done");
 
                 co_return join_node_response_result{};
             },
@@ -7040,6 +7125,7 @@ future<join_node_response_result> storage_service::join_node_response_handler(jo
 
         throw;
     }
+    rtlogger.info("join_node_response_handler done");
 }
 
 future<std::vector<canonical_mutation>> storage_service::get_system_mutations(schema_ptr schema) {
@@ -7730,5 +7816,10 @@ future<> storage_service::register_protocol_server(protocol_server& server, bool
     }
 }
 
+storage_service::token_metadata_ptr storage_service::get_token_metadata_ptr() const noexcept {
+    const auto use_count = _shared_token_metadata.get().use_count() - 1;
+    const auto addr = _shared_token_metadata.get().get();
+    rtlogger.debug("get_token_metadata_ptr, addr {} use count {}  trace  {}", fmt::ptr(addr), use_count, current_backtrace());
+    return _shared_token_metadata.get();
+}
 } // namespace service
-

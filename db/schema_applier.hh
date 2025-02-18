@@ -179,11 +179,8 @@ class schema_applier {
 
     future<schema_persisted_state> get_schema_persisted_state();
 public:
-    schema_applier(
-            sharded<service::storage_proxy>& proxy,
-            sharded<db::system_keyspace>& sys_ks,
-            bool reload = false)
-            : _proxy(proxy), _sys_ks(sys_ks), _reload(reload) {};
+    schema_applier(sharded<service::storage_proxy>& proxy, sharded<db::system_keyspace>& sys_ks, bool reload = false);
+    ~schema_applier();
 
     // Gets called before mutations are applied,
     // preferably no work should be done here but subsystem

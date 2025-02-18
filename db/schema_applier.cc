@@ -677,6 +677,7 @@ static future<affected_tables_and_views> merge_tables_and_views(distributed<serv
                     make_token_metadata_ptr(co_await new_token_metadata->clone_async());
         });
         diff.new_token_metadata.local() = std::move(new_token_metadata);
+        slogger.debug("Tablet metadata changed: done new metadata {}, use count {} ", fmt::ptr(diff.new_token_metadata.local().get()), diff.new_token_metadata.local().use_count());
     }
 
     co_return diff;
@@ -1105,10 +1106,15 @@ static future<> do_merge_schema(distributed<service::storage_proxy>& proxy, shar
     schema_applier ap(proxy, sys_ks, reload);
     co_await ap.prepare(mutations);
     co_await proxy.local().get_db().local().apply(freeze(mutations), db::no_timeout);
+    slogger.trace("do_merge_schema: update");
     co_await ap.update();
+    slogger.trace("do_merge_schema: commit");
     co_await ap.commit();
+    slogger.trace("do_merge_schema: notify");
     co_await ap.notify();
+    slogger.trace("do_merge_schema: destroy");
     co_await ap.destroy();
+    slogger.trace("do_merge_schema: finished");
 }
 
 /**
@@ -1129,13 +1135,26 @@ future<> merge_schema(sharded<db::system_keyspace>& sys_ks, distributed<service:
         }));
         co_return;
     }
+    slogger.trace("merge_schema obtain merge lock");
     co_await with_merge_lock([&] () mutable -> future<> {
+        slogger.trace("merge_schema: locked start");
         co_await do_merge_schema(proxy, sys_ks, std::move(mutations), reload);
+        slogger.trace("merge_schema: get_group0_schema_version");
         auto version_from_group0 = co_await get_group0_schema_version(sys_ks.local());
         co_await update_schema_version_and_announce(sys_ks, proxy, feat.cluster_schema_features(), version_from_group0);
+        slogger.trace("merge_schema: locked finish");
     });
+    slogger.trace("merge_schema Finished");
 }
 
+schema_applier::schema_applier(sharded<service::storage_proxy>& proxy, sharded<db::system_keyspace>& sys_ks, bool reload)
+    : _proxy(proxy)
+    , _sys_ks(sys_ks)
+    , _reload(reload) {
+        slogger.trace("schema_applier {}: created", fmt::ptr(this));
+    };
+schema_applier::~schema_applier() {
+    slogger.trace("schema_applier {}: destroyed", fmt::ptr(this));
 }
-
+} // namespace schema_tables
 }

@@ -2700,6 +2700,7 @@ void tablet_storage_group_manager::update_effective_replication_map(const locato
 }
 
 void table::update_effective_replication_map(locator::effective_replication_map_ptr erm) {
+    tlogger.debug("Updating effective replication map for {}.{}, token_metadata ptr {}", _schema->ks_name(), _schema->cf_name(), fmt::ptr(erm->get_token_metadata_ptr().get()));
     auto old_erm = std::exchange(_erm, std::move(erm));
 
     auto refresh_mutation_source = [this] {

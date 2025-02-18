@@ -1029,6 +1029,8 @@ bool fsm::apply_snapshot(snapshot_descriptor snp, size_t max_trailing_entries, s
         leader_state().log_limiter_semaphore->signal(units);
     }
     _sm_events.signal();
+
+    logger.trace("apply_snapshot finished");
     return true;
 }
 

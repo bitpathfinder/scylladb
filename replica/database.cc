@@ -3008,6 +3008,7 @@ size_t database::tables_metadata::size() const noexcept {
 }
 
 future<rwlock::holder> database::tables_metadata::hold_write_lock() {
+    dblog.info("hold_write_lock write lock for tables_metadata, stack {}", current_backtrace());
     co_return co_await _cf_lock.hold_write_lock();
 }
 
@@ -3070,14 +3071,18 @@ void database::tables_metadata::for_each_table_id(std::function<void(const ks_cf
 }
 
 future<> database::tables_metadata::for_each_table_gently(std::function<future<>(table_id, lw_shared_ptr<table>)> f) {
+    dblog.info("for_each_table_gently locking {}", current_backtrace());
     auto holder = co_await _cf_lock.hold_read_lock();
+    dblog.info("for_each_table_gently locked {}", current_backtrace());
     for (auto& [id, table]: _column_families) {
         co_await f(id, table);
     }
 }
 
 future<> database::tables_metadata::parallel_for_each_table(std::function<future<>(table_id, lw_shared_ptr<table>)> f) {
+    dblog.info("parallel_for_each_table locking {}", current_backtrace());
     auto holder = co_await _cf_lock.hold_read_lock();
+    dblog.info("parallel_for_each_table locked {}", current_backtrace());
     co_await coroutine::parallel_for_each(_column_families, [f = std::move(f)] (auto& table) {
         return f(table.first, table.second);
     });

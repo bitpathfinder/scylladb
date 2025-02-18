@@ -22,6 +22,7 @@
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/semaphore.hh>
+#include <seastar/core/weak_ptr.hh>
 #include <seastar/core/sharded.hh>
 #include "utils/phased_barrier.hh"
 #include "service/topology_state_machine.hh"
@@ -110,6 +111,7 @@ public:
     };
 private:
     utils::phased_barrier::operation _op;
+    void* tm_ptr = nullptr;
     service::topology::version_t _version;
     link_type _link;
 
@@ -119,10 +121,9 @@ private:
     std::chrono::steady_clock::duration _log_threshold;
 public:
     version_tracker() = default;
-    version_tracker(utils::phased_barrier::operation op, service::topology::version_t version)
-        : _op(std::move(op)), _version(version) {}
-    version_tracker(version_tracker&&) noexcept = default;
-    version_tracker& operator=(version_tracker&&) noexcept = default;
+    version_tracker(utils::phased_barrier::operation op, service::topology::version_t version, void* ptr);
+    version_tracker(version_tracker&&) noexcept;
+    version_tracker& operator=(version_tracker&&) noexcept;
     version_tracker(const version_tracker&) = delete;
     ~version_tracker();
 
@@ -355,6 +356,7 @@ public:
     friend class shared_token_metadata;
 private:
     void set_version_tracker(version_tracker_t tracker);
+    const version_tracker_t& get_version_tracker() const;
 };
 
 struct topology_change_info {
@@ -376,10 +378,11 @@ mutable_token_metadata_ptr make_token_metadata_ptr(Args... args) {
     return make_lw_shared<token_metadata>(std::forward<Args>(args)...);
 }
 
-class shared_token_metadata {
+class shared_token_metadata  {
     mutable_token_metadata_ptr _shared;
     token_metadata_lock_func _lock_func;
     std::chrono::steady_clock::duration _stall_detector_threshold = std::chrono::seconds(2);
+    mutable std::vector<mutable_token_metadata_ptr> _clones;
 
     // We use this barrier during the transition to a new token_metadata version to ensure that the
     // system stops using previous versions. Here are the key points:
@@ -421,15 +424,15 @@ public:
         return _shared;
     }
 
+    ~shared_token_metadata();
+
     void set(mutable_token_metadata_ptr tmptr) noexcept;
 
     void set_stall_detector_threshold(std::chrono::steady_clock::duration threshold) {
         _stall_detector_threshold = threshold;
     }
 
-    future<> stale_versions_in_use() const {
-        return _stale_versions_in_use.get_future();
-    }
+    future<> stale_versions_in_use() const;
 
     void update_fence_version(token_metadata::version_t version);
     token_metadata::version_t get_fence_version() const noexcept {
