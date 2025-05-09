@@ -90,6 +90,8 @@
 #include "locator/util.hh"
 #include "tools/build_info.hh"
 #include "utils/labels.hh"
+#include <boost/scope_exit.hpp>
+
 
 namespace bi = boost::intrusive;
 
@@ -1560,6 +1562,7 @@ public:
             , _trace_state(trace_state), _cl(cl), _type(type), _mutation_holder(std::move(mh)), _targets(std::move(targets)),
               _dead_endpoints(std::move(dead_endpoints)), _stats(stats), _expire_timer([this] { timeout_cb(); }), _permit(std::move(permit)),
               _rate_limit_info(rate_limit_info), _view_backlog(max_backlog()) {
+        slogger.info("{} abstract_write_response_handler", fmt::ptr(this));
         // original comment from cassandra:
         // during bootstrap, include pending endpoints in the count
         // or we may fail the consistency level guarantees (see #833, #8058)
@@ -1571,6 +1574,7 @@ public:
         }
     }
     virtual ~abstract_write_response_handler() {
+        slogger.info("{} ~abstract_write_response_handler", fmt::ptr(this));
         --_stats.writes;
         if (_cl_achieved) {
             if (_throttled) {
@@ -3596,6 +3600,7 @@ future<result<>> storage_proxy::mutate_end(future<result<>> mutate_result, utils
         auto&& res = mutate_result.get();
         if (res) {
             tracing::trace(trace_state, "Mutation successfully completed");
+            slogger.info("Mutation finished");
         }
         return std::move(res);
     },  utils::result_catch<replica::no_such_keyspace>([&] (const auto& ex, auto&& handle) {
@@ -3863,7 +3868,7 @@ storage_proxy::mutate_internal(Range mutations, db::consistency_level cl, bool c
         return make_ready_future<result<>>(bo::success());
     }
 
-    slogger.trace("mutate cl={}", cl);
+    slogger.info("mutate cl={}", cl);
     mlogger.trace("mutations={}", mutations);
 
     // If counters is set it means that we are replicating counter shards. There
@@ -4461,7 +4466,7 @@ public:
         });
         _timeout.arm(timeout);
     }
-    virtual ~abstract_read_resolver() {};
+    virtual ~abstract_read_resolver() { slogger.info("~abstract_read_resolver {} ", fmt::ptr(this)); };
     virtual void on_error(locator::host_id ep, error_kind kind) = 0;
     future<result<>> done() {
         return _done_promise.get_future();
@@ -4549,7 +4554,14 @@ public:
         , _effective_replication_map_ptr(std::move(ermp))
         , _block_for(block_for)
         , _target_count_for_cl(target_count_for_cl)
-    {}
+    {
+        slogger.info("digest_read_resolver {}, erm {} ", fmt::ptr(this), fmt::ptr(_effective_replication_map_ptr.get()));
+    }
+
+    virtual ~digest_read_resolver() {
+        slogger.info("~digest_read_resolver {} ", fmt::ptr(this));
+    }
+
     virtual size_t response_count() const override {
         return _digest_results.size();
     }
@@ -5801,6 +5813,11 @@ storage_proxy::query_result_local_digest(locator::effective_replication_map_ptr 
 future<rpc::tuple<foreign_ptr<lw_shared_ptr<query::result>>, cache_temperature>>
 storage_proxy::query_result_local(locator::effective_replication_map_ptr erm, schema_ptr query_schema, lw_shared_ptr<query::read_command> cmd, const dht::partition_range& pr, query::result_options opts,
                                   tracing::trace_state_ptr trace_state, storage_proxy::clock_type::time_point timeout, db::per_partition_rate_limit::info rate_limit_info) {
+    slogger.info("query_result_local: erm {}", fmt::ptr(erm.get()));
+    BOOST_SCOPE_EXIT(&erm) {
+        slogger.info("query_result_local finished: erm {}", fmt::ptr(erm.get()));
+    } BOOST_SCOPE_EXIT_END
+
     cmd->slice.options.set_if<query::partition_slice::option::with_digest>(opts.request != query::result_request::only_result);
     if (auto shard_opt = dht::is_single_shard(erm->get_sharder(*query_schema), *query_schema, pr)) {
         auto shard = *shard_opt;

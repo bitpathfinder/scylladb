@@ -19,6 +19,9 @@
 #include "utils/sequenced_set.hh"
 #include "utils/simple_hashers.hh"
 #include "tablets.hh"
+#include <seastar/core/debug_shared_ptr.hh>
+//#include <seastar/core/shared_ptr.hh>
+
 
 // forward declaration since replica/database.hh includes this file
 namespace replica {
@@ -272,7 +275,9 @@ public:
     }
 };
 
+//using effective_replication_map_ptr = seastar::dbg::dbg_shared_ptr<const effective_replication_map>;
 using effective_replication_map_ptr = seastar::shared_ptr<const effective_replication_map>;
+//using mutable_effective_replication_map_ptr = seastar::dbg::dbg_shared_ptr<effective_replication_map>;
 using mutable_effective_replication_map_ptr = seastar::shared_ptr<effective_replication_map>;
 
 /// Replication strategies which support per-table replication extend this trait.
@@ -294,7 +299,8 @@ public:
 // effective replication strategy over the given token_metadata
 // and replication_strategy_config_options.
 // Used for token-based replication strategies.
-class vnode_effective_replication_map : public enable_shared_from_this<vnode_effective_replication_map>
+//class vnode_effective_replication_map : public dbg::enable_shared_from_this<vnode_effective_replication_map>
+class vnode_effective_replication_map : public seastar::enable_shared_from_this<vnode_effective_replication_map>
                                       , public effective_replication_map {
 public:
     struct factory_key {
@@ -411,13 +417,17 @@ public:
     }
 };
 
-using vnode_effective_replication_map_ptr = shared_ptr<const vnode_effective_replication_map>;
-using mutable_vnode_effective_replication_map_ptr = shared_ptr<vnode_effective_replication_map>;
+//using vnode_effective_replication_map_ptr = dbg::dbg_shared_ptr<const vnode_effective_replication_map>;
+//using mutable_vnode_effective_replication_map_ptr = dbg::dbg_shared_ptr<vnode_effective_replication_map>;
+
+using vnode_effective_replication_map_ptr = seastar::shared_ptr<const vnode_effective_replication_map>;
+using mutable_vnode_effective_replication_map_ptr = seastar::shared_ptr<vnode_effective_replication_map>;
 using vnode_erm_ptr = vnode_effective_replication_map_ptr;
 using mutable_vnode_erm_ptr = mutable_vnode_effective_replication_map_ptr;
 
 inline mutable_vnode_erm_ptr make_effective_replication_map(replication_strategy_ptr rs, token_metadata_ptr tmptr, replication_map replication_map, ring_mapping pending_endpoints,
     ring_mapping read_endpoints, std::unordered_set<locator::host_id> dirty_endpoints, size_t replication_factor) {
+    //return seastar::dbg::make_shared<vnode_effective_replication_map>(
     return seastar::make_shared<vnode_effective_replication_map>(
             std::move(rs), std::move(tmptr), std::move(replication_map),
         std::move(pending_endpoints), std::move(read_endpoints), std::move(dirty_endpoints), replication_factor);

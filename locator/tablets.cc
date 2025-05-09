@@ -1045,6 +1045,7 @@ void tablet_aware_replication_strategy::process_tablet_options(abstract_replicat
 
 effective_replication_map_ptr tablet_aware_replication_strategy::do_make_replication_map(
         table_id table, replication_strategy_ptr rs, token_metadata_ptr tm, size_t replication_factor) const {
+//    return seastar::dbg::make_shared<tablet_effective_replication_map>(table, std::move(rs), std::move(tm), replication_factor);
     return seastar::make_shared<tablet_effective_replication_map>(table, std::move(rs), std::move(tm), replication_factor);
 }
 

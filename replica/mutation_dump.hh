@@ -15,6 +15,7 @@ namespace locator {
 
 class effective_replication_map;
 
+//using effective_replication_map_ptr = seastar::dbg::dbg_shared_ptr<const effective_replication_map>;
 using effective_replication_map_ptr = seastar::shared_ptr<const effective_replication_map>;
 
 }

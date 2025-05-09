@@ -7282,6 +7282,7 @@ void storage_service::init_messaging_service() {
     };
     ser::streaming_rpc_verbs::register_tablet_stream_files(&_messaging.local(),
             [this] (const rpc::client_info& cinfo, streaming::stream_files_request req) -> future<streaming::stream_files_response> {
+        slogger.info("streaming::tablet_stream_files_handler");
         streaming::stream_files_response resp;
         resp.stream_bytes = co_await container().map_reduce0([req] (storage_service& ss) -> future<size_t> {
             auto res = co_await streaming::tablet_stream_files_handler(ss._db.local(), ss._messaging.local(), req, [&ss] (locator::host_id host) -> future<gms::inet_address> {
