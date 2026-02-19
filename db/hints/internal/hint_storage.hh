@@ -10,7 +10,7 @@
 
 // Scylla includes.
 #include "db/commitlog/commitlog.hh"
-#include "db/commitlog/commitlog_entry.hh"
+#include "db/commitlog/commitlog_entry_io.hh"
 #include "db/hints/internal/common.hh"
 #include "utils/loading_shared_values.hh"
 
