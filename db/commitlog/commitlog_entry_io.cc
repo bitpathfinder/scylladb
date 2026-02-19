@@ -7,7 +7,7 @@
  */
 
 #include "mutation/counters.hh"
-#include "commitlog_entry.hh"
+#include "commitlog_entry_io.hh"
 #include "idl/commitlog.dist.hh"
 #include "idl/commitlog.dist.impl.hh"
 

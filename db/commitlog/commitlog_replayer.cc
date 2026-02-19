@@ -24,7 +24,7 @@
 #include "db/system_keyspace.hh"
 #include "utils/log.hh"
 #include "mutation/converting_mutation_partition_applier.hh"
-#include "commitlog_entry.hh"
+#include "commitlog_entry_io.hh"
 #include "validation.hh"
 #include "mutation/mutation_partition_view.hh"
 

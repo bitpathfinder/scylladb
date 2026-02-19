@@ -15,6 +15,7 @@
 #include <seastar/core/simple-stream.hh>
 #include "replay_position.hh"
 #include "commitlog_entry.hh"
+#include "commitlog_entry_io.hh"
 #include "db/timeout_clock.hh"
 #include "gc_clock.hh"
 #include "utils/fragmented_temporary_buffer.hh"

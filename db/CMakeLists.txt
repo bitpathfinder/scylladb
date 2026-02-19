@@ -12,7 +12,7 @@ target_sources(db
     cql_type_parser.cc
     commitlog/commitlog.cc
     commitlog/commitlog_replayer.cc
-    commitlog/commitlog_entry.cc
+    commitlog/commitlog_entry_io.cc
     data_listeners.cc
     functions/function.cc
     hints/internal/hint_endpoint_manager.cc
