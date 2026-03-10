@@ -116,6 +116,7 @@
 #include "idl/raft_storage.dist.impl.hh"
 #include "idl/raft.dist.impl.hh"
 #include "idl/raft_util.dist.impl.hh"
+#include "idl/raft_messaging.dist.impl.hh"
 #include "idl/group0.dist.impl.hh"
 #include "idl/view.dist.impl.hh"
 #include "idl/replica_exception.dist.impl.hh"
