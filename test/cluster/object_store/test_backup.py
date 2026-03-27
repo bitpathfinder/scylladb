@@ -17,7 +17,7 @@ from test.cluster.object_store.conftest import format_tuples
 from test.cluster.util import wait_for_cql_and_get_hosts, get_replication, new_test_keyspace
 from test.pylib.rest_client import read_barrier
 from test.pylib.util import unique_name, wait_all
-from cassandra.cluster import ConsistencyLevel
+from cassandra.cluster import ConsistencyLevel, NoHostAvailable
 from collections import defaultdict
 from test.pylib.util import wait_for
 from test.pylib.rest_client import HTTPError
@@ -636,7 +636,20 @@ async def collect_mutations(cql, server, manager, ks, cf):
     host = await wait_for_cql_and_get_hosts(cql, [server], time.time() + 30)
     await read_barrier(manager.api, server.ip_addr)  # scylladb/scylladb#18199
     ret = defaultdict(list)
-    for frag in await cql.run_async(f"SELECT * FROM MUTATION_FRAGMENTS({ks}.{cf})", host=host[0]):
+    # The driver may transiently tear down and rebuild the connection pool for a
+    # host during a token map rebuild (triggered by topology/status change events).
+    # A single unguarded run_async(..., host=...) can therefore hit a brief window
+    # where no pool exists and throw NoHostAvailable even though the node is up.
+    # Retry with the same 30-second deadline to ride out the transient.
+    async def run_query():
+        try:
+            frags = await cql.run_async(f"SELECT * FROM MUTATION_FRAGMENTS({ks}.{cf})", host=host[0])
+            return frags
+        except NoHostAvailable:
+            logging.info(f"Driver temporarily lost connection to {server.ip_addr}, retrying")
+            return None
+    frags = await wait_for(run_query, time.time() + 30)
+    for frag in frags:
         ret[frag.pk].append({'mutation_source': frag.mutation_source, 'partition_region': frag.partition_region, 'node': server.ip_addr})
     return ret
 
