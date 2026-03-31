@@ -107,6 +107,7 @@ db::commitlog::config db::commitlog::config::from_db_config(const db::config& cf
     c.extensions = &cfg.extensions();
     c.use_o_dsync = cfg.commitlog_use_o_dsync();
     c.allow_going_over_size_limit = false;
+    c.use_variant_commitlog_entry_format = cfg.check_experimental(db::experimental_features_t::feature::STRONGLY_CONSISTENT_TABLES);
 
     if (cfg.commitlog_flush_threshold_in_mb() >= 0) {
         c.commitlog_flush_threshold_in_mb = cfg.commitlog_flush_threshold_in_mb();
@@ -870,6 +871,9 @@ public:
 
     bool is_schema_version_known(schema_ptr s) {
         return _known_schema_versions.contains(s->version());
+    }
+    bool use_variant_commitlog_entry_format() const {
+        return _segment_manager->cfg.use_variant_commitlog_entry_format;
     }
     void add_schema_version(schema_ptr s) {
         _known_schema_versions.emplace(s->version());
@@ -2417,7 +2421,8 @@ future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager:
 
 future<db::commitlog::segment_manager::sseg_ptr> db::commitlog::segment_manager::allocate_segment() {
     for (;;) {
-        descriptor d(next_id(), cfg.fname_prefix);
+        auto ver = cfg.use_variant_commitlog_entry_format ? descriptor::segment_version_5 : descriptor::segment_version_4;
+        descriptor d(next_id(), cfg.fname_prefix, ver);
         auto dst = filename(d);
         auto flags = open_flags::wo;
         if (cfg.use_o_dsync) {
@@ -3068,21 +3073,22 @@ future<db::rp_handle> db::commitlog::add(const cf_id_type& id,
     return _segment_manager->allocate_when_possible(serializer_func_entry_writer(id, size, std::move(func), sync), timeout);
 }
 
-future<db::rp_handle> db::commitlog::add_entry(const cf_id_type& id, const commitlog_entry_writer& cew, timeout_clock::time_point timeout)
+future<db::rp_handle> db::commitlog::add_entry(const cf_id_type& id, const commitlog_mutation_entry_writer& cew, timeout_clock::time_point timeout)
 {
     SCYLLA_ASSERT(id == cew.schema()->id());
 
     class cl_entry_writer final : public entry_writer {
-        commitlog_entry_writer _writer;
+        commitlog_mutation_entry_writer _writer;
     public:
         rp_handle res;
-        cl_entry_writer(const commitlog_entry_writer& wr) 
+        cl_entry_writer(const commitlog_mutation_entry_writer& wr)
             : entry_writer(wr.sync()), _writer(wr) 
         {}
         const cf_id_type& id(size_t) const override {
             return _writer.schema()->id();
         }
         size_t size(segment& seg) override {
+            _writer.set_use_variant_commitlog_entry_format(seg.use_variant_commitlog_entry_format());
             _writer.set_with_schema(!seg.is_schema_version_known(_writer.schema()));
             return _writer.size();
         }
@@ -3112,15 +3118,15 @@ future<db::rp_handle> db::commitlog::add_entry(const cf_id_type& id, const commi
 }
 
 future<utils::chunked_vector<db::rp_handle>>
-db::commitlog::add_entries(utils::chunked_vector<commitlog_entry_writer> entry_writers, db::timeout_clock::time_point timeout) {
+db::commitlog::add_entries(utils::chunked_vector<commitlog_mutation_entry_writer> entry_writers, db::timeout_clock::time_point timeout) {
     class cl_entries_writer final : public entry_writer {
-        utils::chunked_vector<commitlog_entry_writer> _writers;
+        utils::chunked_vector<commitlog_mutation_entry_writer> _writers;
         std::unordered_set<table_schema_version> _known;
         const segment* _sizes_computed = nullptr;
     public:
         utils::chunked_vector<rp_handle> res;
 
-        cl_entries_writer(force_sync sync, utils::chunked_vector<commitlog_entry_writer> entry_writers)
+        cl_entries_writer(force_sync sync, utils::chunked_vector<commitlog_mutation_entry_writer> entry_writers)
             : entry_writer(sync, entry_writers.size()), _writers(std::move(entry_writers))
         {
             res.reserve(_writers.size());
@@ -3131,6 +3137,7 @@ db::commitlog::add_entries(utils::chunked_vector<commitlog_entry_writer> entry_w
         size_t size(segment& seg) override {
             size_t res = 0;
             for (auto i = _writers.begin(), e = _writers.end(); i != e; ++i) {
+                i->set_use_variant_commitlog_entry_format(seg.use_variant_commitlog_entry_format());
                 auto known = seg.is_schema_version_known(i->schema());
                 if (!known) {
                     known = _known.contains(i->schema()->version());
@@ -3147,12 +3154,13 @@ db::commitlog::add_entries(utils::chunked_vector<commitlog_entry_writer> entry_w
         size_t size(segment& seg, size_t i) override {
             auto& w = _writers.at(i);
             if (_sizes_computed != &seg) {
+                w.set_use_variant_commitlog_entry_format(seg.use_variant_commitlog_entry_format());
                 w.set_with_schema(seg.is_schema_version_known(w.schema())); 
             }
             return w.size();
         }
         size_t size() const override {
-            return std::accumulate(_writers.begin(), _writers.end(), size_t(0), [](size_t acc, const commitlog_entry_writer& w) {
+            return std::accumulate(_writers.begin(), _writers.end(), size_t(0), [](size_t acc, const commitlog_mutation_entry_writer& w) {
                 return w.mutation_size() + acc;
             });
         }
@@ -3443,7 +3451,7 @@ db::commitlog::read_log_file(const replay_state& state, sstring filename, sstrin
             if (magic != segment::segment_magic) {
                 throw invalid_segment_format();
             }
-            if (ver != descriptor::current_version) {
+            if (ver < descriptor::segment_version_4 || ver > descriptor::segment_version_5) {
                 throw std::invalid_argument("Cannot replay old commitlog segments");
             }
 
