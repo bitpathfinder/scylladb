@@ -1044,6 +1044,7 @@ void database::init_schema_commitlog() {
     c.extensions = &_cfg.extensions();
     c.use_o_dsync = _cfg.commitlog_use_o_dsync();
     c.allow_going_over_size_limit = true; // for lower latency
+    c.use_variant_commitlog_entry_format = false;
     if (features().fragmented_commitlog_entries) {
         c.allow_fragmented_entries = true;
     }
@@ -2253,7 +2254,7 @@ future<> database::apply_with_commitlog(column_family& cf, const mutation& m, db
         auto fm = freeze(m);
         std::exception_ptr ex;
         try {
-            commitlog_entry_writer cew(m.schema(), fm, db::commitlog::force_sync::no);
+            commitlog_mutation_entry_writer cew(m.schema(), fm, db::commitlog::force_sync::no);
             auto f_h = co_await coroutine::as_future(cf.commitlog()->add_entry(m.schema()->id(), cew, timeout));
             if (!f_h.failed()) {
                 h = f_h.get();
@@ -2285,7 +2286,7 @@ future<> database::apply(const utils::chunked_vector<frozen_mutation>& muts, db:
 }
 
 future<> database::do_apply_many(const utils::chunked_vector<frozen_mutation>& muts, db::timeout_clock::time_point timeout) {
-    utils::chunked_vector<commitlog_entry_writer> writers;
+    utils::chunked_vector<commitlog_mutation_entry_writer> writers;
     db::commitlog* cl = nullptr;
 
     if (muts.empty()) {
@@ -2317,7 +2318,7 @@ future<> database::do_apply_many(const utils::chunked_vector<frozen_mutation>& m
         }
 
         dblog.trace("apply [{}/{}]: {}", i, muts.size() - 1, muts[i].pretty_printer(s));
-        writers.emplace_back(s, muts[i], commitlog_entry_writer::force_sync::yes);
+        writers.emplace_back(s, muts[i], commitlog_mutation_entry_writer::force_sync::yes);
     }
 
     if (!cl) {
@@ -2402,7 +2403,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
     if (cl != nullptr && cf.durable_writes() && !cf.uses_logstor()) {
         std::exception_ptr ex;
         try {
-            commitlog_entry_writer cew(s, m, sync);
+            commitlog_mutation_entry_writer cew(s, m, sync);
             auto f_h = co_await coroutine::as_future(cf.commitlog()->add_entry(uuid, cew, timeout));
             if (!f_h.failed()) {
                 h = f_h.get();

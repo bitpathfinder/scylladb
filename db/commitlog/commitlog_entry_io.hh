@@ -32,6 +32,7 @@ namespace detail {
         char* _ptr;
         size_t _size;
         size_t _sector_size;
+
     public:
         sector_split_iterator(const sector_split_iterator&) noexcept;
         sector_split_iterator(base_iterator i, base_iterator e, size_t sector_size);
@@ -67,27 +68,30 @@ namespace detail {
         auto* operator->() const {
             return this;
         }
-
         sector_split_iterator& operator++();
         sector_split_iterator operator++(int);
     };
+
+    enum commitlog_entry_serialization_format : uint8_t { mutation, variant };
 }
 
-class commitlog_entry_writer {
+class commitlog_mutation_entry_writer {
 public:
     using force_sync = db::commitlog_force_sync;
 private:
     schema_ptr _schema;
     const frozen_mutation& _mutation;
-    bool _with_schema = true;
     size_t _size = std::numeric_limits<size_t>::max();
     force_sync _sync;
+    bool _with_schema = true;
+    detail::commitlog_entry_serialization_format _commitlog_format = detail::commitlog_entry_serialization_format::mutation;
+
 private:
     template<typename Output>
     void serialize(Output&) const;
     void compute_size();
 public:
-    commitlog_entry_writer(schema_ptr s, const frozen_mutation& fm, force_sync sync)
+    commitlog_mutation_entry_writer(schema_ptr s, const frozen_mutation& fm, force_sync sync)
         : _schema(std::move(s)), _mutation(fm), _sync(sync)
     {}
 
@@ -96,9 +100,23 @@ public:
             compute_size();
         }
     }
+
     bool with_schema() const {
         return _with_schema;
     }
+
+    void set_use_variant_commitlog_entry_format(bool value) {
+        const auto new_format = value ? detail::commitlog_entry_serialization_format::variant : detail::commitlog_entry_serialization_format::mutation;
+        const auto previous_format = std::exchange(_commitlog_format, new_format);
+        if (previous_format != new_format || _size == std::numeric_limits<size_t>::max()) {
+            compute_size();
+        }
+    }
+
+    bool use_variant_commitlog_entry_format() const {
+        return _commitlog_format == detail::commitlog_entry_serialization_format::variant;
+    }
+
     schema_ptr schema() const {
         return _schema;
     }
@@ -111,21 +129,66 @@ public:
     size_t mutation_size() const {
         return _mutation.representation().size();
     }
+
     force_sync sync() const {
         return _sync;
     }
 
     using ostream = typename seastar::memory_output_stream<detail::sector_split_iterator>;
-
     void write(ostream& out) const;
 };
 
-class commitlog_entry_reader {
-    commitlog_entry _ce;
-public:
-    commitlog_entry_reader(const fragmented_temporary_buffer& buffer);
 
-    const std::optional<column_mapping>& get_column_mapping() const { return _ce.mapping(); }
-    const frozen_mutation& mutation() const & { return _ce.mutation(); }
-    frozen_mutation&& mutation() && { return std::move(_ce).mutation(); }
+// Mutation entry reader for hints commitlog (reads raw mutation_entry format).
+class commitlog_mutation_entry_reader {
+    mutation_entry _me;
+public:
+    commitlog_mutation_entry_reader(const fragmented_temporary_buffer& buffer);
+    const std::optional<column_mapping>& get_column_mapping() const { return _me.mapping(); }
+    const frozen_mutation& mutation() const & { return _me.mutation(); }
+    frozen_mutation&& mutation() && { return std::move(_me).mutation(); }
 };
+
+// Writer for Raft log entries to the database commit log using the commitlog_entry format.
+class commitlog_raft_log_entry_writer {
+public:
+protected:
+    raft_commit_log_entry _item;
+    std::size_t _size = std::numeric_limits<std::size_t>::max();
+
+    template <typename Output>
+    void serialize(Output& out) const;
+    void compute_size();
+public:
+    explicit commitlog_raft_log_entry_writer(raft_commit_log_entry item)
+        : _item(std::move(item)) {
+        compute_size();
+    }
+
+    size_t size() const {
+        SCYLLA_ASSERT(_size != std::numeric_limits<size_t>::max());
+        return _size;
+    }
+
+    using ostream = typename seastar::memory_output_stream<detail::sector_split_iterator>;
+    void write(ostream& out) const;
+    const raft_commit_log_entry& get_log_entry() const {
+        return _item;
+    }
+};
+
+class commitlog_entry_reader {
+    commitlog_entry _entry;
+
+public:
+    explicit commitlog_entry_reader(const fragmented_temporary_buffer& buffer,
+            detail::commitlog_entry_serialization_format format = detail::commitlog_entry_serialization_format::mutation);
+
+    const commitlog_entry& entry() const& {
+        return _entry;
+    }
+    commitlog_entry&& entry() && {
+        return std::move(_entry);
+    }
+};
+
