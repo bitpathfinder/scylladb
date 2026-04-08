@@ -92,6 +92,7 @@ class db::cf_holder {
 public:
     virtual ~cf_holder() {};
     virtual void release_cf_count(const cf_id_type&, const replay_position&) = 0;
+    virtual void increment_cf_count(const cf_id_type&) = 0;
 };
 
 db::commitlog::config db::commitlog::config::from_db_config(const db::config& cfg, seastar::scheduling_group sg, size_t shard_available_memory) {
@@ -894,9 +895,17 @@ public:
             _segment_manager->discard_unused_segments();
         }
     }
+    // Note: we intentionally do not erase from _extended_segments here.
+    // With rp_handle::clone(), multiple handles can share the same replay
+    // position, and an early erase would drop dependent segment handles
+    // while other clones still exist.  Instead, _extended_segments is
+    // cleaned up when the whole segment becomes deletable (can_delete()
+    // -> _extended_segments.clear() in release_cf_count(cf) above).
     void release_cf_count(const cf_id_type& cf, const replay_position& rp) override {
-        _extended_segments.erase(rp);
         release_cf_count(cf);
+    }
+    void increment_cf_count(const cf_id_type& cf) override {
+        _cf_dirty[cf]++;
     }
 
     bool must_sync() {
@@ -4012,4 +4021,12 @@ db::rp_handle::~rp_handle() {
 
 db::replay_position db::rp_handle::release() {
     return std::exchange(_rp, {});
+}
+
+db::rp_handle db::rp_handle::clone() const {
+    if (!_h || _rp == replay_position()) {
+        return rp_handle();
+    }
+    _h->increment_cf_count(_cf);
+    return rp_handle(_h, _cf, _rp);
 }

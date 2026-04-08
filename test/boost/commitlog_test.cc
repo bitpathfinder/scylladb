@@ -2550,4 +2550,166 @@ SEASTAR_TEST_CASE(test_commitlog_replay_segment_order) {
     });
 }
 
+
+SEASTAR_TEST_CASE(test_rp_handle_clone_basic) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto uuid = make_table_id();
+        sstring tmp = "hej bubba cow";
+        rp_handle h = co_await log.add_mutation(uuid, tmp.size(), db::commitlog::force_sync::no, [tmp](db::commitlog::output& dst) {
+            dst.write(tmp.data(), tmp.size());
+        });
+        BOOST_REQUIRE(h);
+        auto orig_rp = h.rp();
+
+        auto cloned = h.clone();
+        BOOST_REQUIRE(cloned);
+        BOOST_CHECK_EQUAL(cloned.rp(), orig_rp);
+        // Original still valid after clone.
+        BOOST_REQUIRE(h);
+        BOOST_CHECK_EQUAL(h.rp(), orig_rp);
+    });
+}
+
+// Test that cloning an empty/default handle returns an empty handle.
+SEASTAR_TEST_CASE(test_rp_handle_clone_empty) {
+    rp_handle empty;
+    BOOST_REQUIRE(!empty);
+
+    auto cloned = empty.clone();
+    BOOST_REQUIRE(!cloned);
+    return make_ready_future<>();
+}
+
+// Test that destroying clones does not release the segment while the
+// original handle is still alive.  After the original is also destroyed
+// (via discard), the segment becomes eligible for deletion.
+SEASTAR_TEST_CASE(test_rp_handle_clone_segment_lifetime) {
+    commitlog::config cfg;
+    cfg.commitlog_segment_size_in_mb = 1;
+    return cl_test(cfg, [](commitlog& log) -> future<> {
+        auto uuid = make_table_id();
+        sstring tmp = "hej bubba cow";
+
+        // Write one entry, clone the handle, destroy the clone, then verify
+        // that the segment stays alive because the original handle still
+        // holds the dirty count.
+        rp_handle h = co_await log.add_mutation(uuid, tmp.size(), db::commitlog::force_sync::no, [tmp](db::commitlog::output& dst) {
+            dst.write(tmp.data(), tmp.size());
+        });
+        auto entry_rp = h.rp();
+
+        // Clone and immediately destroy — segment must survive.
+        {
+            auto cloned = h.clone();
+            BOOST_REQUIRE(cloned);
+            // cloned destroyed here
+        }
+        // Original still valid.
+        BOOST_REQUIRE(h);
+        BOOST_CHECK_EQUAL(h.rp(), entry_rp);
+
+        // Force a new segment and sync so the old one could be recycled
+        // if the dirty count had been incorrectly released.
+        rp_set set;
+        set.put(std::move(h));
+        co_await log.force_new_active_segment();
+        co_await log.sync_all_segments();
+
+        auto destroyed_before = log.get_num_segments_destroyed();
+
+        // Discard the original — now the segment can be cleaned up.
+        log.discard_completed_segments(uuid, set);
+
+        auto destroyed_after = log.get_num_segments_destroyed();
+        BOOST_CHECK_GE(destroyed_after, destroyed_before);
+    });
+}
+
+// Test that release() on a cloned handle clears it
+// without triggering segment cleanup.
+SEASTAR_TEST_CASE(test_rp_handle_clone_release) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto uuid = make_table_id();
+        sstring tmp = "hej bubba cow";
+        rp_handle h = co_await log.add_mutation(uuid, tmp.size(), db::commitlog::force_sync::no, [tmp](db::commitlog::output& dst) {
+            dst.write(tmp.data(), tmp.size());
+        });
+        auto orig_rp = h.rp();
+
+        auto cloned = h.clone();
+        BOOST_REQUIRE(cloned);
+
+        // Release the clone — returns rp, handle becomes empty.
+        auto released_rp = cloned.release();
+        BOOST_CHECK_EQUAL(released_rp, orig_rp);
+        BOOST_REQUIRE(!cloned);
+
+        // Original still valid and functional.
+        BOOST_REQUIRE(h);
+        BOOST_CHECK_EQUAL(h.rp(), orig_rp);
+    });
+}
+
+// Test multiple clones: each independently owns a dirty-count slot,
+// segment stays alive until the last one is destroyed.
+SEASTAR_TEST_CASE(test_rp_handle_clone_multiple) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto uuid = make_table_id();
+        sstring tmp = "hej bubba cow";
+        rp_handle h = co_await log.add_mutation(uuid, tmp.size(), db::commitlog::force_sync::no, [tmp](db::commitlog::output& dst) {
+            dst.write(tmp.data(), tmp.size());
+        });
+        auto orig_rp = h.rp();
+
+        // Create multiple clones.
+        auto c1 = h.clone();
+        auto c2 = h.clone();
+        auto c3 = c1.clone(); // clone of a clone
+
+        BOOST_REQUIRE(c1);
+        BOOST_REQUIRE(c2);
+        BOOST_REQUIRE(c3);
+        BOOST_CHECK_EQUAL(c1.rp(), orig_rp);
+        BOOST_CHECK_EQUAL(c2.rp(), orig_rp);
+        BOOST_CHECK_EQUAL(c3.rp(), orig_rp);
+
+        // Destroy some clones — original still valid.
+        c1 = rp_handle();
+        c2 = rp_handle();
+        BOOST_REQUIRE(h);
+        BOOST_REQUIRE(c3);
+
+        // Destroy remaining clone.
+        c3 = rp_handle();
+        BOOST_REQUIRE(h);
+        BOOST_CHECK_EQUAL(h.rp(), orig_rp);
+    });
+}
+
+// Test that moving a cloned handle works correctly.
+SEASTAR_TEST_CASE(test_rp_handle_clone_move) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto uuid = make_table_id();
+        sstring tmp = "hej bubba cow";
+        rp_handle h = co_await log.add_mutation(uuid, tmp.size(), db::commitlog::force_sync::no, [tmp](db::commitlog::output& dst) {
+            dst.write(tmp.data(), tmp.size());
+        });
+        auto orig_rp = h.rp();
+
+        auto cloned = h.clone();
+        BOOST_REQUIRE(cloned);
+
+        // Move the clone.
+        rp_handle moved = std::move(cloned);
+        BOOST_REQUIRE(!cloned);
+        BOOST_REQUIRE(moved);
+        BOOST_CHECK_EQUAL(moved.rp(), orig_rp);
+
+        // Original still valid.
+        BOOST_REQUIRE(h);
+        BOOST_CHECK_EQUAL(h.rp(), orig_rp);
+    });
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()
