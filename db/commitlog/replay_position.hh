@@ -62,6 +62,18 @@ class cf_holder;
 
 using cf_id_type = table_id;
 
+// Handle to a replay position in a commitlog segment.  Destroying the
+// handle decrements the segment's per-CF dirty count; once no handles
+// (and no flush) reference the segment it becomes eligible for deletion.
+//
+// clone() creates an independent handle that increments the segment's
+// dirty count for the CF — each handle (original and clones) owns
+// exactly one dirty-count slot.  Both the original's destructor and the
+// clone's destructor independently decrement when destroyed.
+//
+//   - release(): clears _rp so the destructor becomes a no-op, then
+//     returns the replay_position.  Used by rp_set::put() to transfer
+//     ownership to the memtable flush path.
 class rp_handle {
 public:
     rp_handle() noexcept;
@@ -70,6 +82,7 @@ public:
     ~rp_handle();
 
     replay_position release();
+    rp_handle clone() const;
 
     operator bool() const {
         return _h && _rp != replay_position();
