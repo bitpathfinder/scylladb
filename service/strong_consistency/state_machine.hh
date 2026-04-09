@@ -12,6 +12,7 @@
 #include "mutation/frozen_mutation.hh"
 #include <functional>
 #include "locator/tablets.hh"
+#include "service/strong_consistency/raft_groups_storage.hh"
 
 namespace db {
 class system_keyspace;
@@ -31,7 +32,8 @@ std::unique_ptr<raft_state_machine> make_state_machine(locator::global_tablet_id
     raft::group_id gid,
     replica::database& db,
     service::migration_manager& mm,
-    db::system_keyspace& sys_ks);
+    db::system_keyspace& sys_ks,
+    raft_groups_storage& storage);
 
 // Resolve schemas for frozen mutations and upgrade them to the current schema if needed.
 // For each mutation, looks up the schema version in the local schema registry. If the mutation
@@ -54,4 +56,4 @@ namespace detail {
 // The log entry must contain a raft::command in its data variant.
 frozen_mutation deserialize_to_frozen_mutation(const raft::log_entry_ptr& entry);
 } // namespace detail
-} // namespace service::strong_consistency
+}
