@@ -22,6 +22,7 @@
 #include "utils/loading_cache.hh"
 #include "utils/error_injection.hh"
 #include "schema/schema_registry.hh"
+#include "service/strong_consistency/commitlog_persistence.hh"
 
 using namespace std::chrono_literals;
 
@@ -35,16 +36,19 @@ class state_machine : public raft_state_machine {
     replica::database& _db;
     service::migration_manager& _mm;
     db::system_keyspace& _sys_ks;
+    raft_groups_storage& _persistence;
 
     abort_source _as;
 
 public:
-    state_machine(locator::global_tablet_id tablet, raft::group_id gid, replica::database& db, service::migration_manager& mm, db::system_keyspace& sys_ks)
+    state_machine(locator::global_tablet_id tablet, raft::group_id gid, replica::database& db, service::migration_manager& mm, db::system_keyspace& sys_ks,
+            raft_groups_storage& persistence)
         : _tablet(tablet)
         , _group_id(gid)
         , _db(db)
         , _mm(mm)
-        , _sys_ks(sys_ks) {
+        , _sys_ks(sys_ks)
+        , _persistence(persistence) {
     }
 
     future<raft::need_snapshot> apply(raft::log_entry_ptr_list command) override {
@@ -58,6 +62,10 @@ public:
                 auto mutation = detail::deserialize_to_frozen_mutation(log_entry);
                 muts.emplace_back(mutation);
             }
+            // Get replay positions for the commands.
+            auto replay_positions = _persistence.get_replay_position_handles_for(command);
+            // Make sure we got replay positions for all commands.
+            throwing_assert(replay_positions.size() == command.size());
             // Get schemas for all mutations (also upgrades mutations to current schema if needed).
             auto barrier = [this]() -> future<> {
                 if (utils::get_local_injector().enter("disable_raft_drop_append_entries_for_specified_group")) {
@@ -66,8 +74,14 @@ public:
                 co_await _mm.get_group0_barrier().trigger(false, &_as);
             };
             auto schemas = co_await resolve_and_upgrade_mutations(muts, _tablet.table, _db, _sys_ks, barrier);
-            // Apply all mutations. Hold schema pointers alive until apply() is finished.
-            co_await _db.apply(std::move(muts), db::no_timeout);
+            // Apply all mutations
+            std::vector<future<>> apply_futures;
+            apply_futures.reserve(muts.size());
+            for (size_t i = 0; i < command.size(); ++i) {
+                throwing_assert(replay_positions[i].index == command[i]->idx);
+                apply_futures.emplace_back(_db.apply_in_memory(muts[i], schemas[i], std::move(replay_positions[i].replay_position_handle), db::no_timeout));
+            }
+            co_await when_all_succeed(apply_futures.begin(), apply_futures.end());
         } catch (replica::no_such_column_family&) {
             // If the table doesn't exist, it means it was already dropped.
             // This cannot happen if the table wasn't created yet on the node
@@ -215,9 +229,9 @@ future<utils::chunked_vector<schema_ptr>> resolve_and_upgrade_mutations(utils::c
     co_return std::move(result);
 }
 
-std::unique_ptr<raft_state_machine> make_state_machine(
-        locator::global_tablet_id tablet, raft::group_id gid, replica::database& db, service::migration_manager& mm, db::system_keyspace& sys_ks) {
-    return std::make_unique<state_machine>(tablet, gid, db, mm, sys_ks);
+std::unique_ptr<raft_state_machine> make_state_machine(locator::global_tablet_id tablet, raft::group_id gid, replica::database& db,
+        service::migration_manager& mm, db::system_keyspace& sys_ks, raft_groups_storage& persistence) {
+    return std::make_unique<state_machine>(tablet, gid, db, mm, sys_ks, persistence);
 }
 
 namespace detail {

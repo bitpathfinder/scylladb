@@ -32,6 +32,9 @@
 #include "idl/commitlog.dist.hh"
 #include "idl/commitlog.dist.impl.hh"
 #include "test/lib/mutation_source_test.hh"
+#include "service/strong_consistency/commitlog_persistence.hh"
+#include "idl/raft_storage.dist.hh"
+#include "idl/raft_storage.dist.impl.hh"
 
 BOOST_AUTO_TEST_SUITE(commitlog_raft_replay_test)
 
@@ -338,7 +341,7 @@ SEASTAR_TEST_CASE(test_raft_replay_buffer_process_discards_unknown_groups) {
                 BOOST_CHECK_EQUAL(buffer.total_entries(), 2);
 
                 // Process — group_id has no matching tablet metadata, so entries should be discarded.
-                co_await buffer.process_raft_replayed_items(env.local_db(), env.local_qp());
+                co_await buffer.process_raft_replayed_items(env.local_db(), env.local_qp(), env.get_system_keyspace().local());
 
                 // After processing, old entries are cleared.
                 BOOST_CHECK_EQUAL(buffer.remaining_groups(), 0);
@@ -1554,4 +1557,144 @@ BOOST_AUTO_TEST_CASE(test_multiple_groups_independence) {
     BOOST_CHECK(result3 == expected3);
 }
 
+// Test that uncommitted raft entries survive destruction of commitlog_persistence.
+// When commitlog_persistence is destroyed, release() is called on remaining handles
+// to prevent segment dirty count from being decremented. This keeps commitlog
+// segments alive so entries can be replayed after restart.
+//
+// Without release(), the destructors would decrement dirty counts to zero,
+// making segments eligible for deletion on the next discard_completed_segments call.
+SEASTAR_TEST_CASE(test_uncommitted_entries_survive_persistence_destruction) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto gid = make_group_id();
+        auto tid = make_table_id();
+
+        auto segments_destroyed_before = log.get_num_segments_destroyed();
+
+        // Store entries via commitlog_persistence, then destroy it.
+        // The entries should remain readable from the commitlog afterwards.
+        std::vector<replay_position> stored_rps;
+        {
+            service::strong_consistency::replayed_data_per_group replayed_data;
+            service::strong_consistency::commitlog_persistence persistence(
+                    gid, log, tid, std::move(replayed_data));
+
+            raft::log_entry_ptr_list entries = {
+                    make_dummy_entry(raft::term_t(1), raft::index_t(1)),
+                    make_command_entry(raft::term_t(1), raft::index_t(2)),
+                    make_config_entry(raft::term_t(1), raft::index_t(3)),
+            };
+            co_await persistence.store_log_entries(entries);
+
+            // Record the replay positions before destruction.
+            auto handles = persistence.get_replay_position_handles_for(entries);
+            for (auto& h : handles) {
+                stored_rps.push_back(h.replay_position_handle.rp());
+            }
+            // handles (clones) go out of scope here — decrement dirty count once.
+            // But originals still in persistence map.
+
+            // persistence is destroyed here — release() prevents the originals
+            // from decrementing, so the segment dirty count remains > 0.
+        }
+
+        co_await log.sync_all_segments();
+        co_await log.force_new_active_segment();
+
+        // No segments should have been destroyed — the leaked dirty count
+        // from release() prevents the segment from being considered unused.
+        BOOST_REQUIRE_EQUAL(log.get_num_segments_destroyed(), segments_destroyed_before);
+
+        // Verify entries are still readable from the commitlog.
+        auto segments = log.get_active_segment_names();
+        BOOST_REQUIRE(!segments.empty());
+
+        size_t found = 0;
+        for (auto& seg : segments) {
+            co_await db::commitlog::read_log_file(
+                    seg, db::commitlog::descriptor::FILENAME_PREFIX, [&](db::commitlog::buffer_and_replay_position buf_rp) -> future<> {
+                        auto&& [buf, rp] = buf_rp;
+                        auto it = std::ranges::find(stored_rps, rp);
+                        if (it == stored_rps.end()) {
+                            co_return;
+                        }
+
+                        commitlog_entry_reader reader(buf, detail::commitlog_entry_serialization_format::variant);
+                        auto& entry_var = reader.entry().item;
+                        BOOST_REQUIRE(std::holds_alternative<raft_commit_log_entry>(entry_var));
+
+                        auto& rle = std::get<raft_commit_log_entry>(entry_var);
+                        BOOST_REQUIRE_EQUAL(rle.group_id, gid);
+                        ++found;
+                        co_return;
+                    });
+        }
+        BOOST_REQUIRE_EQUAL(found, stored_rps.size());
+    });
+}
+
+// Test that clone() provides shared ownership: both the original handle in
+// commitlog_persistence and the clone can independently keep a segment alive.
+// After get_replay_position_handles_for() returns clones, destroying the
+// clones should NOT make the segment eligible for deletion — the originals
+// in the persistence map still hold it.
+SEASTAR_TEST_CASE(test_clone_shared_ownership) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto gid = make_group_id();
+        auto tid = make_table_id();
+
+        service::strong_consistency::replayed_data_per_group replayed_data;
+        service::strong_consistency::commitlog_persistence persistence(
+                gid, log, tid, std::move(replayed_data));
+
+        raft::log_entry_ptr_list entries = {
+                make_dummy_entry(raft::term_t(1), raft::index_t(1)),
+                make_command_entry(raft::term_t(1), raft::index_t(2)),
+        };
+        co_await persistence.store_log_entries(entries);
+        co_await log.sync_all_segments();
+
+        auto segments_destroyed_before = log.get_num_segments_destroyed();
+
+        // Get cloned handles (simulating what apply() does).
+        {
+            auto handles = persistence.get_replay_position_handles_for(entries);
+            BOOST_REQUIRE_EQUAL(handles.size(), 2);
+            // Clones are destroyed here when handles goes out of scope.
+            // Their dirty count decrements, but the originals in the
+            // persistence map still keep the segment alive.
+        }
+
+        co_await log.force_new_active_segment();
+
+        // No segments destroyed — originals still hold dirty count.
+        BOOST_REQUIRE_EQUAL(log.get_num_segments_destroyed(), segments_destroyed_before);
+
+        // Verify entries still readable via new clones.
+        auto segments = log.get_active_segment_names();
+        BOOST_REQUIRE(!segments.empty());
+
+        std::vector<replay_position> rps;
+        auto handles2 = persistence.get_replay_position_handles_for(entries);
+        for (auto& h : handles2) {
+            rps.push_back(h.replay_position_handle.rp());
+        }
+
+        size_t found = 0;
+        for (auto& seg : segments) {
+            co_await db::commitlog::read_log_file(
+                    seg, db::commitlog::descriptor::FILENAME_PREFIX, [&](db::commitlog::buffer_and_replay_position buf_rp) -> future<> {
+                        auto&& [buf, rp] = buf_rp;
+                        if (std::ranges::find(rps, rp) == rps.end()) {
+                            co_return;
+                        }
+                        commitlog_entry_reader reader(buf, detail::commitlog_entry_serialization_format::variant);
+                        BOOST_REQUIRE(std::holds_alternative<raft_commit_log_entry>(reader.entry().item));
+                        ++found;
+                        co_return;
+                    });
+        }
+        BOOST_REQUIRE_EQUAL(found, entries.size());
+    });
+}
 BOOST_AUTO_TEST_SUITE_END()

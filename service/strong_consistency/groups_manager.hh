@@ -12,9 +12,12 @@
 #include "message/messaging_service.hh"
 #include "service/raft/raft_group_registry.hh"
 #include "cql3/query_processor.hh"
+#include "db/commitlog/commitlog.hh"
+#include "db/commitlog/raft_commitlog_replay_buffer.hh"
 
 namespace db {
 class system_keyspace;
+class raft_commitlog_replay_buffer;
 }
 
 namespace service {
@@ -78,6 +81,7 @@ class groups_manager : public peering_sharded_service<groups_manager> {
     service::migration_manager& _mm;
     db::system_keyspace& _sys_ks;
     gms::feature_service& _features;
+    db::raft_commitlog_replay_buffer& _raft_replay_buffer;
     std::unordered_map<raft::group_id, raft_group_state> _raft_groups = {};
     locator::token_metadata_ptr _pending_tm = nullptr;
     bool _started = false;
@@ -98,7 +102,7 @@ class groups_manager : public peering_sharded_service<groups_manager> {
 public:
     groups_manager(netw::messaging_service& ms, raft_group_registry& raft_gr, 
         cql3::query_processor& qp, replica::database& _db, service::migration_manager& mm, db::system_keyspace& sys_ks,
-        gms::feature_service& features);
+        gms::feature_service& features, db::raft_commitlog_replay_buffer& raft_replay_buffer);
 
     // Called whenever a new token_metadata is published on this shard.
     // Starts raft::server instances for all strongly consistent tablets now
