@@ -408,7 +408,7 @@ public:
             snapshots* snapshots):
         _id(id), _apply(std::move(apply)), _apply_entries(apply_entries), _snapshots(snapshots),
         hasher(make_lw_shared<hasher_int>()) {}
-    future<> apply(raft::log_entry_ptr_list commands) override {
+    future<raft::need_snapshot> apply(raft::log_entry_ptr_list commands) override {
         auto n = _apply(_id, commands, hasher);
         _seen += n;
         if (n && _seen >= _apply_entries) {
@@ -419,7 +419,7 @@ public:
             _done.set_value();
         }
         tlogger.debug("sm::apply[{}] got {}/{} entries", _id, _seen, _apply_entries);
-        return make_ready_future<>();
+        return make_ready_future<raft::need_snapshot>(raft::need_snapshot::no);
     }
 
     future<raft::snapshot_id> take_snapshot() override {

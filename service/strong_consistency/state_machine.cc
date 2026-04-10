@@ -38,26 +38,21 @@ class state_machine : public raft_state_machine {
     abort_source _as;
 
 public:
-    state_machine(locator::global_tablet_id tablet,
-        raft::group_id gid,
-        replica::database& db,
-        service::migration_manager& mm,
-        db::system_keyspace& sys_ks)
+    state_machine(locator::global_tablet_id tablet, raft::group_id gid, replica::database& db, service::migration_manager& mm, db::system_keyspace& sys_ks)
         : _tablet(tablet)
         , _group_id(gid)
         , _db(db)
         , _mm(mm)
-        , _sys_ks(sys_ks)
-    {
+        , _sys_ks(sys_ks) {
     }
 
-    future<> apply(raft::log_entry_ptr_list command) override {
+    future<raft::need_snapshot> apply(raft::log_entry_ptr_list command) override {
         static thread_local logging::logger::rate_limit rate_limit(std::chrono::seconds(10));
         try {
             co_await utils::get_local_injector().inject("strong_consistency_state_machine_wait_before_apply", utils::wait_for_message(20min));
             utils::chunked_vector<frozen_mutation> muts;
             muts.reserve(command.size());
-            for (const auto& entry: command) {
+            for (const auto& entry : command) {
                 auto&& c = std::get<raft::command>(entry->data);
                 auto is = ser::as_input_stream(c);
                 auto cmd = ser::deserialize(is, std::type_identity<raft_command>{});
@@ -69,7 +64,7 @@ public:
         } catch (replica::no_such_column_family&) {
             // If the table doesn't exist, it means it was already dropped.
             // This cannot happen if the table wasn't created yet on the node
-            // because the state machine is created only after the table is created 
+            // because the state machine is created only after the table is created
             // (see `schema_applier::commit_on_shard()` and `storage_service::commit_token_metadata_change()`).
             // In this case, we should just ignore mutations without throwing an error.
             logger.log(log_level::warn, rate_limit, "apply(): table {} was already dropped, ignoring mutations", _tablet.table);
@@ -92,28 +87,24 @@ public:
             // Fortunately, in strong consistency, we use the default Raft server
             // implementation, which handles abort_requested_exception thrown by
             // raft::state_machine::apply -- it will simply end the applier fiber.
-            logger.debug("apply(): execution for tablet {}, group_id={} aborted due to: {}",
-                _tablet, _group_id, ex);
+            logger.debug("apply(): execution for tablet {}, group_id={} aborted due to: {}", _tablet, _group_id, ex);
             throw;
+        } catch (...) {
+            throw std::runtime_error(::format("tablet {}, group id {}: error while applying mutations {}", _tablet, _group_id, std::current_exception()));
         }
-         catch (...) {
-            throw std::runtime_error(::format(
-                "tablet {}, group id {}: error while applying mutations {}",
-                _tablet, _group_id, std::current_exception()));
-        }
+        co_return raft::need_snapshot::yes;
     }
 
     future<raft::snapshot_id> take_snapshot() override {
-        // Until snapshot transfer is fully implemented, return a fake ID
-        // and don't actually do anything. As long as we don't do snapshot
-        // transfers (attempting to do that throws an exception), we should
-        // be safe.
+        // Snapshot is a no-op for strongly consistent tables since the data
+        // is already persisted in SSTables. We just return a random snapshot ID.
+        // The raft server will then call store_snapshot_descriptor which updates
+        // the snapshot index, allowing old commitlog entries to be discarded on replay.
         return make_ready_future<raft::snapshot_id>(raft::snapshot_id(utils::make_random_uuid()));
     }
 
     void drop_snapshot(raft::snapshot_id id) override {
-        // Taking a snapshot is a no-op, so dropping a snapshot is also a no-op.
-        (void) id;
+        // No-op: strongly consistent tables do not have physical snapshots
     }
 
     future<> load_snapshot(raft::snapshot_id id) override {
@@ -140,7 +131,7 @@ private:
         schema_store schema_mappings;
         bool barrier_executed = false;
 
-        auto get_schema = [&] (table_schema_version schema_version) -> future<std::pair<schema_ptr, column_mappings_cache::value_ptr>> {
+        auto get_schema = [&](table_schema_version schema_version) -> future<std::pair<schema_ptr, column_mappings_cache::value_ptr>> {
             if (utils::get_local_injector().enter("sc_state_machine_return_empty_schema")) {
                 co_return std::pair{nullptr, nullptr};
             }
@@ -149,7 +140,7 @@ private:
             if (schema) {
                 co_return std::pair{std::move(schema), nullptr};
             }
-            
+
             // `_db.find_schema()` may throw `replica::no_such_column_family` if the table was already dropped.
             schema = _db.find_schema(_tablet.table);
             // The column mapping may be already present in the cache from another `apply()` call
@@ -165,13 +156,13 @@ private:
                 co_return std::pair{nullptr, nullptr};
             }
 
-            cm_ptr = co_await column_mapping_cache.get_ptr(schema_version, [cm = std::move(*cm_opt)] (auto schema_version) -> future<column_mapping> {
+            cm_ptr = co_await column_mapping_cache.get_ptr(schema_version, [cm = std::move(*cm_opt)](auto schema_version) -> future<column_mapping> {
                 co_return std::move(cm);
             });
             co_return std::pair{std::move(schema), std::move(cm_ptr)};
         };
 
-        auto resolve_schema = [&] (const frozen_mutation& mut) -> future<const schema_store::mapped_type*> {
+        auto resolve_schema = [&](const frozen_mutation& mut) -> future<const schema_store::mapped_type*> {
             auto schema_version = mut.schema_version();
             auto it = schema_mappings.find(schema_version);
             if (it != schema_mappings.end()) {
@@ -195,7 +186,7 @@ private:
             co_return nullptr;
         };
 
-        for (auto& m: muts) {
+        for (auto& m : muts) {
             auto schema_entry = co_await resolve_schema(m);
             if (!schema_entry) {
                 // Old schema are TTLed after 10 days (see comment in `schema_applier::finalize_tables_and_views()`),
@@ -206,7 +197,7 @@ private:
             }
             if (schema_entry->second) {
                 m = freeze(m.unfreeze_upgrading(schema_entry->first, *schema_entry->second));
-            }   
+            }
         }
 
         // We only need vector of schema pointers but we're returning the whole map
@@ -215,13 +206,9 @@ private:
     }
 };
 
-std::unique_ptr<raft_state_machine> make_state_machine(locator::global_tablet_id tablet,
-    raft::group_id gid,
-    replica::database& db,
-    service::migration_manager& mm,
-    db::system_keyspace& sys_ks)
-{
+std::unique_ptr<raft_state_machine> make_state_machine(
+        locator::global_tablet_id tablet, raft::group_id gid, replica::database& db, service::migration_manager& mm, db::system_keyspace& sys_ks) {
     return std::make_unique<state_machine>(tablet, gid, db, mm, sys_ks);
 }
 
-};
+}; // namespace service::strong_consistency

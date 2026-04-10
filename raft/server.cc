@@ -1375,9 +1375,10 @@ future<> server_impl::applier_fiber() {
                        std::back_inserter(commands));
 
                 const auto size = commands.size();
+                need_snapshot sm_needs_snapshot = need_snapshot::no;
                 if (size) {
                     try {
-                        co_await _state_machine->apply(std::move(commands));
+                        sm_needs_snapshot = co_await _state_machine->apply(std::move(commands));
                     } catch (abort_requested_exception& e) {
                         logger.info("[{}] applier fiber stopped because state machine was aborted: {}", _id, e);
                         throw stop_apply_fiber{};
@@ -1401,7 +1402,7 @@ future<> server_impl::applier_fiber() {
                 // of taking snapshots ourselves but comparing our last index directly with what's currently in _fsm.
                 const auto last_snap_idx = _fsm->log_last_snapshot_idx();
 
-                const bool force_snapshot = utils::get_local_injector().enter("raft_server_force_snapshot");
+                const bool force_snapshot = utils::get_local_injector().enter("raft_server_force_snapshot") || sm_needs_snapshot;
 
                 if (force_snapshot || (_applied_idx > last_snap_idx &&
                     ((_applied_idx - last_snap_idx).value() >= _config.snapshot_threshold ||
