@@ -360,7 +360,7 @@ static void ensure_group0_schema(const group0_command& cmd, data_dictionary::dat
 }
 #endif
 
-future<> group0_state_machine::apply(raft::log_entry_ptr_list commands) {
+future<raft::need_snapshot> group0_state_machine::apply(raft::log_entry_ptr_list commands) {
     slogger.trace("apply() is called with {} commands", commands.size());
 
     co_await utils::get_local_injector().inject("group0_state_machine::delay_apply", 1s);
@@ -417,6 +417,7 @@ future<> group0_state_machine::apply(raft::log_entry_ptr_list commands) {
     }
 
     co_await _state_id_handler.advertise_state_id(m.last_id());
+    co_return raft::need_snapshot::no;
 }
 
 future<raft::snapshot_id> group0_state_machine::take_snapshot() {

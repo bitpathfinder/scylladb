@@ -74,6 +74,7 @@ struct server_address {
 };
 
 using is_voter = bool_class<struct is_voter_tag>;
+using need_snapshot = bool_class<struct need_snapshot_tag>;
 
 struct config_member {
     server_address addr;
@@ -555,7 +556,8 @@ public:
     // Raft owns the data since it may be still replicating.
     // Raft will not call another apply until the returned future
     // will not become ready.
-    virtual future<> apply(log_entry_ptr_list command) = 0;
+    // Returns need_snapshot::yes if the state machine wants a snapshot to be taken.
+    virtual future<need_snapshot> apply(log_entry_ptr_list command) = 0;
 
     // The function suppose to take a snapshot of a state machine
     // To be called during log compaction or when a leader brings
