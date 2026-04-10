@@ -1697,4 +1697,368 @@ SEASTAR_TEST_CASE(test_clone_shared_ownership) {
         BOOST_REQUIRE_EQUAL(found, entries.size());
     });
 }
+// =============================================================================
+// New tests: end-to-end, replay buffer integration, persistence, multi-segment
+// =============================================================================
+
+// End-to-end commitlog persistence roundtrip with full field verification.
+// Writes raft entries from two groups (with command, config, and dummy types)
+// to a commitlog, reads active segments back, and verifies every entry's
+// group_id, term, index, and data variant are recovered exactly.
+SEASTAR_TEST_CASE(test_end_to_end_commitlog_replay_full_verification) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto gid1 = make_group_id();
+        auto gid2 = make_group_id();
+        auto tid = make_table_id();
+
+        struct entry_info {
+            raft::group_id gid;
+            raft::term_t term;
+            raft::index_t idx;
+            size_t variant_idx; // 0=command, 1=config, 2=dummy
+        };
+
+        std::vector<entry_info> infos = {
+                {gid1, raft::term_t(1), raft::index_t(1), 0},
+                {gid1, raft::term_t(1), raft::index_t(2), 1},
+                {gid2, raft::term_t(2), raft::index_t(1), 2},
+                {gid1, raft::term_t(1), raft::index_t(3), 0},
+                {gid2, raft::term_t(2), raft::index_t(2), 0},
+                {gid1, raft::term_t(2), raft::index_t(4), 2},
+                {gid2, raft::term_t(3), raft::index_t(3), 1},
+                {gid1, raft::term_t(2), raft::index_t(5), 0},
+                {gid2, raft::term_t(3), raft::index_t(4), 2},
+                {gid1, raft::term_t(2), raft::index_t(6), 1},
+        };
+
+        auto make_entry = [](const entry_info& e) -> raft::log_entry_ptr {
+            if (e.variant_idx == 0)
+                return make_command_entry(e.term, e.idx);
+            if (e.variant_idx == 1)
+                return make_config_entry(e.term, e.idx);
+            return make_dummy_entry(e.term, e.idx);
+        };
+
+        // Write entries to commitlog.
+        std::vector<replay_position> written_rps;
+        for (auto& info : infos) {
+            auto entry = make_entry(info);
+            auto handle = co_await write_raft_entry_to_commitlog(log, tid, info.gid, entry);
+            written_rps.push_back(handle.rp());
+        }
+
+        co_await log.sync_all_segments();
+
+        // Read back from active segments and verify each entry.
+        auto segments = log.get_active_segment_names();
+        BOOST_REQUIRE(!segments.empty());
+
+        size_t found = 0;
+        for (auto& seg : segments) {
+            co_await db::commitlog::read_log_file(
+                    seg, db::commitlog::descriptor::FILENAME_PREFIX, [&](db::commitlog::buffer_and_replay_position buf_rp) -> future<> {
+                        auto&& [buf, rp] = buf_rp;
+                        auto it = std::ranges::find(written_rps, rp);
+                        if (it == written_rps.end()) {
+                            co_return;
+                        }
+
+                        auto idx = std::distance(written_rps.begin(), it);
+                        const auto& expected = infos[idx];
+
+                        commitlog_entry_reader reader(buf, detail::commitlog_entry_serialization_format::variant);
+                        auto& entry_var = reader.entry().item;
+                        BOOST_REQUIRE(std::holds_alternative<raft_commit_log_entry>(entry_var));
+
+                        auto& rle = std::get<raft_commit_log_entry>(entry_var);
+                        BOOST_REQUIRE_EQUAL(rle.group_id, expected.gid);
+                        BOOST_REQUIRE_EQUAL(rle.entry->term, expected.term);
+                        BOOST_REQUIRE_EQUAL(rle.entry->idx, expected.idx);
+                        BOOST_REQUIRE_EQUAL(rle.entry->data.index(), expected.variant_idx);
+                        ++found;
+                        co_return;
+                    });
+        }
+        BOOST_REQUIRE_EQUAL(found, infos.size());
+    });
+}
+
+// Test: commitlog_persistence store, then truncate_log, verify handles.
+// Store 10 entries, truncate at idx 6, verify handles for 1-5 succeed
+// and entries 6-10 are gone.
+SEASTAR_TEST_CASE(test_commitlog_persistence_store_and_truncate_log) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto gid = make_group_id();
+        auto tid = make_table_id();
+
+        service::strong_consistency::replayed_data_per_group replayed_data;
+        service::strong_consistency::commitlog_persistence persistence(
+                gid, log, tid, std::move(replayed_data));
+
+        // Store 10 entries.
+        raft::log_entry_ptr_list all_entries;
+        for (int i = 1; i <= 10; ++i) {
+            all_entries.push_back(make_command_entry(raft::term_t(1), raft::index_t(i)));
+        }
+        co_await persistence.store_log_entries(all_entries);
+
+        // Truncate at idx 6 — entries 6-10 should be removed.
+        persistence.truncate_log(raft::index_t(6));
+
+        // Verify: entries 1-5 should have valid handles.
+        raft::log_entry_ptr_list first_five(all_entries.begin(), all_entries.begin() + 5);
+        auto handles = persistence.get_replay_position_handles_for(first_five);
+        BOOST_REQUIRE_EQUAL(handles.size(), 5);
+        for (int i = 0; i < 5; ++i) {
+            BOOST_REQUIRE_EQUAL(handles[i].index, raft::index_t(i + 1));
+        }
+
+        // Verify: requesting handles for entry 6 should trigger on_internal_error.
+        // Use scoped_no_abort_on_internal_error to catch it.
+        {
+            seastar::testing::scoped_no_abort_on_internal_error no_abort;
+            raft::log_entry_ptr_list entry_six = {all_entries[5]};
+            try {
+                persistence.get_replay_position_handles_for(entry_six);
+                BOOST_FAIL("Expected on_internal_error for truncated entry");
+            } catch (...) {
+                // Expected — entry 6 was truncated.
+            }
+        }
+    });
+}
+
+// Test: truncate_log_tail releases handles for old entries.
+// Store 10 entries, truncate tail at idx 5, verify entries 1-5 are gone
+// but entries 6-10 are still accessible.
+SEASTAR_TEST_CASE(test_commitlog_persistence_truncate_log_tail_releases_handles) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto gid = make_group_id();
+        auto tid = make_table_id();
+
+        service::strong_consistency::replayed_data_per_group replayed_data;
+        service::strong_consistency::commitlog_persistence persistence(
+                gid, log, tid, std::move(replayed_data));
+
+        raft::log_entry_ptr_list all_entries;
+        for (int i = 1; i <= 10; ++i) {
+            all_entries.push_back(make_command_entry(raft::term_t(1), raft::index_t(i)));
+        }
+        co_await persistence.store_log_entries(all_entries);
+
+        // Truncate tail at idx 5 — entries 1-5 handles should be released.
+        persistence.truncate_log_tail(raft::index_t(5));
+
+        // Verify: entries 6-10 should have valid handles.
+        raft::log_entry_ptr_list last_five(all_entries.begin() + 5, all_entries.end());
+        auto handles = persistence.get_replay_position_handles_for(last_five);
+        BOOST_REQUIRE_EQUAL(handles.size(), 5);
+        for (int i = 0; i < 5; ++i) {
+            BOOST_REQUIRE_EQUAL(handles[i].index, raft::index_t(i + 6));
+        }
+
+        // Verify: requesting handles for entry 5 should trigger on_internal_error.
+        {
+            seastar::testing::scoped_no_abort_on_internal_error no_abort;
+            raft::log_entry_ptr_list entry_five = {all_entries[4]};
+            try {
+                persistence.get_replay_position_handles_for(entry_five);
+                BOOST_FAIL("Expected on_internal_error for tail-truncated entry");
+            } catch (...) {
+                // Expected — entry 5 was tail-truncated.
+            }
+        }
+    });
+}
+
+// Test: Replay across multiple commitlog segments.
+// Use the default commitlog from cl_test, write enough entries to fill
+// at least one segment, then read all active segments back and verify
+// order is preserved.
+SEASTAR_TEST_CASE(test_replay_with_multiple_segments) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto gid = make_group_id();
+        auto tid = make_table_id();
+
+        constexpr int num_entries = 50;
+
+        for (int i = 1; i <= num_entries; ++i) {
+            auto entry = make_command_entry(raft::term_t(1), raft::index_t(i));
+            co_await write_raft_entry_to_commitlog(log, tid, gid, entry);
+        }
+
+        co_await log.sync_all_segments();
+
+        auto segments = log.get_active_segment_names();
+        BOOST_REQUIRE(!segments.empty());
+        BOOST_TEST_MESSAGE("Active segments: " << segments.size());
+
+        // Collect all raft entries in replay order.
+        std::vector<std::pair<raft::index_t, raft::term_t>> replayed_entries;
+
+        for (auto& seg : segments) {
+            co_await db::commitlog::read_log_file(
+                    seg, db::commitlog::descriptor::FILENAME_PREFIX, [&](db::commitlog::buffer_and_replay_position buf_rp) -> future<> {
+                        auto&& [buf, rp] = buf_rp;
+                        commitlog_entry_reader reader(buf, detail::commitlog_entry_serialization_format::variant);
+                        auto& entry_var = reader.entry().item;
+                        if (std::holds_alternative<raft_commit_log_entry>(entry_var)) {
+                            auto& rle = std::get<raft_commit_log_entry>(entry_var);
+                            replayed_entries.emplace_back(rle.entry->idx, rle.entry->term);
+                        }
+                        co_return;
+                    });
+        }
+
+        BOOST_REQUIRE_EQUAL(replayed_entries.size(), num_entries);
+
+        // Verify entries are in ascending index order.
+        for (int i = 0; i < num_entries; ++i) {
+            BOOST_REQUIRE_EQUAL(replayed_entries[i].first, raft::index_t(i + 1));
+            BOOST_REQUIRE_EQUAL(replayed_entries[i].second, raft::term_t(1));
+        }
+    });
+}
+
+// Test: Mixed raft and mutation entries through the replay buffer.
+// Write interleaved raft + mutation entries, then verify raft entries end
+// up in the replay buffer and mutations are read as mutations.
+SEASTAR_TEST_CASE(test_mixed_raft_and_mutation_entries_replay_separation) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto gid = make_group_id();
+
+        random_mutation_generator gen(random_mutation_generator::generate_counters::no);
+        auto s = gen.schema();
+        auto tid = s->id();
+
+        // Write interleaved raft and mutation entries.
+        constexpr int count = 5;
+        std::vector<replay_position> raft_rps;
+        std::vector<replay_position> mutation_rps;
+
+        for (int i = 1; i <= count; ++i) {
+            // Raft entry
+            auto entry = make_command_entry(raft::term_t(1), raft::index_t(i));
+            auto raft_handle = co_await write_raft_entry_to_commitlog(log, tid, gid, entry);
+            raft_rps.push_back(raft_handle.rp());
+
+            // Mutation entry
+            auto fm = freeze(gen());
+            commitlog_mutation_entry_writer cew(s, fm, db::commitlog::force_sync::no);
+            auto mut_handle = co_await log.add_entry(tid, cew, db::no_timeout);
+            mutation_rps.push_back(mut_handle.rp());
+        }
+
+        co_await log.sync_all_segments();
+
+        // Read all entries and separate them by type.
+        auto segments = log.get_active_segment_names();
+        BOOST_REQUIRE(!segments.empty());
+
+        db::raft_commitlog_replay_buffer buffer;
+        size_t mutation_count = 0;
+
+        for (auto& seg : segments) {
+            co_await db::commitlog::read_log_file(
+                    seg, db::commitlog::descriptor::FILENAME_PREFIX, [&](db::commitlog::buffer_and_replay_position buf_rp) -> future<> {
+                        auto&& [buf, rp] = buf_rp;
+                        commitlog_entry_reader reader(buf, detail::commitlog_entry_serialization_format::variant);
+                        auto& entry_var = reader.entry().item;
+
+                        if (std::holds_alternative<raft_commit_log_entry>(entry_var)) {
+                            auto& rle = std::get<raft_commit_log_entry>(entry_var);
+                            buffer.add(rle.group_id, rle.entry);
+                        } else {
+                            BOOST_REQUIRE(std::holds_alternative<mutation_entry>(entry_var));
+                            ++mutation_count;
+                        }
+                        co_return;
+                    });
+        }
+
+        // Verify separation: raft entries in buffer, mutations counted separately.
+        BOOST_REQUIRE_EQUAL(buffer.total_entries(), count);
+        BOOST_REQUIRE_EQUAL(buffer.remaining_groups(), 1);
+        BOOST_REQUIRE_EQUAL(mutation_count, count);
+    });
+}
+
+// Test: commitlog_persistence with combined truncate_log + truncate_log_tail.
+// Verifies that truncating both head and tail leaves only the middle entries.
+SEASTAR_TEST_CASE(test_commitlog_persistence_combined_truncation) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto gid = make_group_id();
+        auto tid = make_table_id();
+
+        service::strong_consistency::replayed_data_per_group replayed_data;
+        service::strong_consistency::commitlog_persistence persistence(
+                gid, log, tid, std::move(replayed_data));
+
+        raft::log_entry_ptr_list all_entries;
+        for (int i = 1; i <= 10; ++i) {
+            all_entries.push_back(make_command_entry(raft::term_t(1), raft::index_t(i)));
+        }
+        co_await persistence.store_log_entries(all_entries);
+
+        // Truncate tail (entries <= 3) and head (entries >= 8).
+        persistence.truncate_log_tail(raft::index_t(3));
+        persistence.truncate_log(raft::index_t(8));
+
+        // Only entries 4-7 should remain.
+        raft::log_entry_ptr_list middle(all_entries.begin() + 3, all_entries.begin() + 7);
+        auto handles = persistence.get_replay_position_handles_for(middle);
+        BOOST_REQUIRE_EQUAL(handles.size(), 4);
+        for (int i = 0; i < 4; ++i) {
+            BOOST_REQUIRE_EQUAL(handles[i].index, raft::index_t(i + 4));
+        }
+
+        // Verify boundary entries are gone.
+        {
+            seastar::testing::scoped_no_abort_on_internal_error no_abort;
+            try {
+                raft::log_entry_ptr_list e3 = {all_entries[2]};
+                persistence.get_replay_position_handles_for(e3);
+                BOOST_FAIL("Expected error for tail-truncated entry 3");
+            } catch (...) {
+            }
+
+            try {
+                raft::log_entry_ptr_list e8 = {all_entries[7]};
+                persistence.get_replay_position_handles_for(e8);
+                BOOST_FAIL("Expected error for head-truncated entry 8");
+            } catch (...) {
+            }
+        }
+    });
+}
+
+// Test: commitlog_persistence load_log returns replayed entries exactly once.
+SEASTAR_TEST_CASE(test_commitlog_persistence_load_log_one_shot) {
+    return cl_test([](commitlog& log) -> future<> {
+        auto gid = make_group_id();
+        auto tid = make_table_id();
+
+        // Construct with pre-populated replayed entries.
+        service::strong_consistency::replayed_data_per_group replayed_data;
+        replayed_data.entries.push_back(make_command_entry(raft::term_t(1), raft::index_t(1)));
+        replayed_data.entries.push_back(make_dummy_entry(raft::term_t(1), raft::index_t(2)));
+        replayed_data.entries.push_back(make_config_entry(raft::term_t(2), raft::index_t(3)));
+
+        service::strong_consistency::commitlog_persistence persistence(
+                gid, log, tid, std::move(replayed_data));
+
+        // First call should return the entries.
+        auto entries = persistence.load_log();
+        BOOST_REQUIRE_EQUAL(entries.size(), 3);
+        BOOST_REQUIRE_EQUAL(entries[0]->idx, raft::index_t(1));
+        BOOST_REQUIRE_EQUAL(entries[1]->idx, raft::index_t(2));
+        BOOST_REQUIRE_EQUAL(entries[2]->idx, raft::index_t(3));
+
+        // Second call should return empty (one-shot).
+        auto entries2 = persistence.load_log();
+        BOOST_REQUIRE(entries2.empty());
+        co_return;
+    });
+}
+
 BOOST_AUTO_TEST_SUITE_END()

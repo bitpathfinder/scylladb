@@ -7,6 +7,7 @@
  */
 
 #include <seastar/testing/test_case.hh>
+#include <seastar/testing/on_internal_error.hh>
 #include <seastar/core/coroutine.hh>
 
 #include "db/config.hh"
@@ -550,5 +551,95 @@ SEASTAR_TEST_CASE(test_groups_get_partial_replay_positions) {
         auto handles2 = storage.get_replay_position_handles_for(entries_batch2);
         BOOST_CHECK_EQUAL(handles2.size(), 1);
         BOOST_CHECK_EQUAL(handles2[0].index, raft::index_t(3));
+    });
+}
+
+// Test truncate_log (head truncation) then verify remaining handles.
+// Store 3 entries, truncate at idx 2 (removes entries with idx >= 2),
+// verify only entry 1 can produce a valid handle, and entries 2-3 cannot.
+SEASTAR_TEST_CASE(test_groups_truncate_log_then_get_handles_for_remaining) {
+    return do_with_cql_env_strongly_consistent([] (cql_test_env& env) -> future<> {
+        cql3::query_processor& qp = env.local_qp();
+        auto& cl = *env.local_db().commitlog();
+        auto dummy_table = table_id(utils::UUID_gen::get_time_UUID());
+
+        raft_groups_storage storage(qp, gid, raft::server_id::create_random_id(), test_shard,
+                cl, dummy_table, {});
+
+        std::vector<raft::log_entry_ptr> entries = create_test_log();
+        co_await storage.store_log_entries(entries);
+
+        // Truncate at idx 2 — entries with idx >= 2 should be removed.
+        co_await storage.truncate_log(raft::index_t(2));
+
+        // Entry 1 should still have a valid handle.
+        raft::log_entry_ptr_list first_entry = {entries[0]};
+        auto handles = storage.get_replay_position_handles_for(first_entry);
+        BOOST_CHECK_EQUAL(handles.size(), 1);
+        BOOST_CHECK_EQUAL(handles[0].index, raft::index_t(1));
+
+        // Entries 2-3 should trigger an error (their replay positions were removed).
+        {
+            seastar::testing::scoped_no_abort_on_internal_error no_abort;
+            raft::log_entry_ptr_list truncated_entries(entries.begin() + 1, entries.end());
+            try {
+                storage.get_replay_position_handles_for(truncated_entries);
+                BOOST_FAIL("Expected on_internal_error for truncated entries");
+            } catch (...) {
+                // Expected — entries 2-3 were truncated.
+            }
+        }
+    });
+}
+
+// Test store_snapshot_descriptor (which truncates the log tail) then verify handles.
+// Store 3 entries, store a snapshot at idx 2 with preserve_log_entries=1
+// (which truncates entries with idx <= 2-1 = 1), verify entry 1 is gone
+// but entries 2-3 are still accessible.
+SEASTAR_TEST_CASE(test_groups_store_snapshot_truncate_tail_then_get_handles) {
+    return do_with_cql_env_strongly_consistent([] (cql_test_env& env) -> future<> {
+        cql3::query_processor& qp = env.local_qp();
+        auto& cl = *env.local_db().commitlog();
+        auto dummy_table = table_id(utils::UUID_gen::get_time_UUID());
+
+        raft_groups_storage storage(qp, gid, raft::server_id::create_random_id(), test_shard,
+                cl, dummy_table, {});
+
+        // Bootstrap so we can store a snapshot later.
+        raft::config_member srv{raft::server_address{
+                raft::server_id::create_random_id(), {}
+            }, raft::is_voter::yes};
+        co_await storage.bootstrap(raft::configuration({srv}), false);
+
+        std::vector<raft::log_entry_ptr> entries = create_test_log();
+        co_await storage.store_log_entries(entries);
+
+        // Store snapshot at idx=2 with preserve_log_entries=1.
+        // This truncates the tail: entries with idx <= (2 - 1) = 1 are removed.
+        raft::snapshot_descriptor snp{
+            .idx = raft::index_t(2),
+            .term = raft::term_t(2),
+            .config = raft::configuration({srv}),
+            .id = raft::snapshot_id::create_random_id()};
+        co_await storage.store_snapshot_descriptor(snp, 1 /* preserve_log_entries */);
+
+        // Entries 2-3 should still have valid handles.
+        raft::log_entry_ptr_list remaining(entries.begin() + 1, entries.end());
+        auto handles = storage.get_replay_position_handles_for(remaining);
+        BOOST_CHECK_EQUAL(handles.size(), 2);
+        BOOST_CHECK_EQUAL(handles[0].index, raft::index_t(2));
+        BOOST_CHECK_EQUAL(handles[1].index, raft::index_t(3));
+
+        // Entry 1 should trigger an error (tail-truncated by snapshot).
+        {
+            seastar::testing::scoped_no_abort_on_internal_error no_abort;
+            raft::log_entry_ptr_list truncated_entry = {entries[0]};
+            try {
+                storage.get_replay_position_handles_for(truncated_entry);
+                BOOST_FAIL("Expected on_internal_error for tail-truncated entry");
+            } catch (...) {
+                // Expected — entry 1 was tail-truncated by snapshot.
+            }
+        }
     });
 }
