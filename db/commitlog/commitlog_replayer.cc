@@ -24,6 +24,7 @@
 #include "db/system_keyspace.hh"
 #include "utils/log.hh"
 #include "mutation/converting_mutation_partition_applier.hh"
+#include "utils/chunked_vector.hh"
 #include "commitlog_entry_io.hh"
 #include "validation.hh"
 #include "mutation/mutation_partition_view.hh"
