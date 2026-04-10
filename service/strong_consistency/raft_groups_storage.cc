@@ -87,8 +87,12 @@ future<> raft_groups_storage::store_commit_idx(raft::index_t idx) {
 }
 
 future<raft::index_t> raft_groups_storage::load_commit_idx() {
+    return load_commit_idx(_qp, _group_id, _shard);
+}
+
+future<raft::index_t> raft_groups_storage::load_commit_idx(cql3::query_processor& qp, raft::group_id gid, shard_id shard) {
     static const auto load_cql = format("SELECT commit_idx FROM system.{} WHERE shard = ? AND group_id = ? LIMIT 1", db::system_keyspace::RAFT_GROUPS);
-    ::shared_ptr<cql3::untyped_result_set> rs = co_await _qp.execute_internal(load_cql, {int16_t(_shard), _group_id.id}, cql3::query_processor::cache_internal::yes);
+    ::shared_ptr<cql3::untyped_result_set> rs = co_await qp.execute_internal(load_cql, {int16_t(shard), gid.id}, cql3::query_processor::cache_internal::yes);
     if (rs->empty()) {
         co_return raft::index_t(0);
     }
@@ -123,8 +127,12 @@ future<raft::log_entries> raft_groups_storage::load_log() {
 }
 
 future<raft::snapshot_descriptor> raft_groups_storage::load_snapshot_descriptor() {
+    return load_snapshot_descriptor(_qp, _group_id, _shard);
+}
+
+future<raft::snapshot_descriptor> raft_groups_storage::load_snapshot_descriptor(cql3::query_processor& qp, raft::group_id gid, shard_id shard) {
     static const auto load_id_cql = format("SELECT snapshot_id FROM system.{} WHERE shard = ? AND group_id = ? LIMIT 1", db::system_keyspace::RAFT_GROUPS);
-    ::shared_ptr<cql3::untyped_result_set> id_rs = co_await _qp.execute_internal(load_id_cql, {int16_t(_shard), _group_id.id}, cql3::query_processor::cache_internal::yes);
+    ::shared_ptr<cql3::untyped_result_set> id_rs = co_await qp.execute_internal(load_id_cql, {int16_t(shard), gid.id}, cql3::query_processor::cache_internal::yes);
     if (id_rs->empty() || !id_rs->one().has("snapshot_id")) {
         co_return raft::snapshot_descriptor();
     }
@@ -134,13 +142,13 @@ future<raft::snapshot_descriptor> raft_groups_storage::load_snapshot_descriptor(
     // Fetch raft log index and term for the latest snapshot descriptor
     static const auto load_snp_info_cql = format("SELECT idx, term FROM system.{} WHERE shard = ? AND group_id = ?",
         db::system_keyspace::RAFT_GROUPS_SNAPSHOTS);
-    ::shared_ptr<cql3::untyped_result_set> snp_rs = co_await _qp.execute_internal(load_snp_info_cql, {int16_t(_shard), _group_id.id}, cql3::query_processor::cache_internal::yes);
+    ::shared_ptr<cql3::untyped_result_set> snp_rs = co_await qp.execute_internal(load_snp_info_cql, {int16_t(shard), gid.id}, cql3::query_processor::cache_internal::yes);
     // Should be only one matching row, since each individual server can only
     // have a single snapshot installed at a time
     const auto& snp_row = snp_rs->one();
     // Fetch current and previous raft configurations for the snapshot
     static const auto load_cfg_cql = format("SELECT disposition, server_id, can_vote FROM system.{} WHERE shard = ? AND group_id = ?", db::system_keyspace::RAFT_GROUPS_SNAPSHOT_CONFIG);
-    ::shared_ptr<cql3::untyped_result_set> cfg_rs = co_await _qp.execute_internal(load_cfg_cql, {int16_t(_shard), _group_id.id}, cql3::query_processor::cache_internal::yes);
+    ::shared_ptr<cql3::untyped_result_set> cfg_rs = co_await qp.execute_internal(load_cfg_cql, {int16_t(shard), gid.id}, cql3::query_processor::cache_internal::yes);
 
     raft::configuration cfg;
 
