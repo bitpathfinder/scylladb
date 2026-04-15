@@ -1836,7 +1836,7 @@ SEASTAR_TEST_CASE(test_commitlog_update_max_data_lifetime) {
 /**
  * Test allocating oversized multi-entry
 */
-static future<> do_test_oversized_entry(size_t max_size_mb) {
+static future<> do_test_oversized_entry(size_t max_size_mb, noncopyable_function<void(const commitlog_entry_reader&)> entry_check = {}) {
     commitlog::config cfg;
 
     cfg.commitlog_segment_size_in_mb = max_size_mb;
@@ -1904,6 +1904,9 @@ static future<> do_test_oversized_entry(size_t max_size_mb) {
                 auto m2 = rp2mut.at(rp).unfreeze(gen.schema());
 
                 BOOST_CHECK_EQUAL(m1, m2);
+                if (entry_check) {
+                    entry_check(cer);
+                }
                 ++n;
                 co_return;
             });
@@ -2337,7 +2340,6 @@ SEASTAR_TEST_CASE(test_segment_end_on_entry_end) {
     });
 }
 
-
 // Verify that commitlog segments are replayed in ascending segment ID
 // order within each shard. The replayer distributes segments by shard and
 // iterates them per-shard; this test captures the "Replaying" debug log
@@ -2405,6 +2407,33 @@ SEASTAR_TEST_CASE(test_commitlog_replay_segment_order) {
             BOOST_CHECK_GT(replayed_ids[i], replayed_ids[i - 1]);
         }
     });
+}
+
+/**
+ * Test that add_entries() in the oversized allocation path correctly includes
+ * column mappings in commitlog entries when the schema is not known to the
+ * segment.
+ *
+ * Reproduces a bug where cl_entries_writer::size(segment&, size_t) used the
+ * wrong polarity for set_with_schema (missing negation of
+ * is_schema_version_known), causing column mappings to be omitted when the
+ * schema was unknown to the segment. This happens specifically in the
+ * oversized_allocation() code path, where size(segment&, size_t) is called
+ * without a preceding size(segment&) on the same segment, so the defensive
+ * guard (_sizes_computed != &seg) fires and the buggy line executes.
+ */
+SEASTAR_TEST_CASE(test_commitlog_add_entries_oversized_includes_schema_mapping) {
+    size_t with_mapping = 0;
+    co_await do_test_oversized_entry(1, [&with_mapping](const commitlog_entry_reader& cer) {
+        if (cer.get_column_mapping().has_value()) {
+            ++with_mapping;
+        }
+    });
+    // At least one entry per segment must have the column mapping embedded,
+    // since the schema version is new to each segment. With the bug (missing
+    // negation), no entries would have column mappings because set_with_schema
+    // is passed the wrong value in the oversized path.
+    BOOST_CHECK_GT(with_mapping, 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
