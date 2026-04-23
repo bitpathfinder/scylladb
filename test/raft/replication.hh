@@ -294,6 +294,8 @@ extern seastar::semaphore snapshot_sync;
 extern raft::snapshot_id delay_apply_snapshot;
 // sending of a snapshot with that id will be delayed until snapshot_sync is signaled
 extern raft::snapshot_id delay_send_snapshot;
+// counts how many times take_snapshot() has been called across all state machines
+extern size_t take_snapshot_calls;
 
 // Test connectivity configuration
 struct rpc_config {
@@ -423,6 +425,7 @@ public:
     }
 
     future<raft::snapshot_id> take_snapshot() override {
+        ++take_snapshot_calls;
         auto snp_id = raft::snapshot_id::create_random_id();
         (*_snapshots)[_id][snp_id].hasher = *hasher;
         tlogger.debug("sm[{}] takes snapshot id {} {} seen {}", _id, (*_snapshots)[_id][snp_id].hasher.finalize_uint64(), snp_id, _seen);

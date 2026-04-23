@@ -1017,6 +1017,37 @@ bool fsm::apply_snapshot(snapshot_descriptor snp, size_t max_trailing_entries, s
     return true;
 }
 
+bool fsm::advance_snapshot(index_t idx, term_t term, size_t max_trailing_entries, size_t max_trailing_bytes, bool local) {
+    logger.trace("advance_snapshot[{}]: current term: {}, term: {}, idx: {}, local: {}",
+            _my_id, _current_term, term, idx, local);
+    SCYLLA_ASSERT(local && idx <= _observed._commit_idx);
+
+    const auto& current_snp = _log.get_snapshot();
+    if (idx <= current_snp.idx) {
+        logger.trace("advance_snapshot[{}]: ignore non-advancing idx={} current snapshot idx={}",
+                _my_id, idx, current_snp.idx);
+        return false;
+    }
+
+    snapshot_descriptor snp = current_snp; // preserve snapshot id
+    snp.idx = idx;
+    snp.term = term;
+    snp.config = _log.last_conf_for(idx);
+
+    _commit_idx = std::max(_commit_idx, idx);
+    const auto [units, new_first_index] = _log.apply_snapshot(std::move(snp), max_trailing_entries, max_trailing_bytes);
+    _output.snp.emplace(fsm_output::applied_snapshot{
+        .snp = _log.get_snapshot(),
+        .is_local = local,
+        .preserved_log_entries = _log.get_snapshot().idx.value() + 1 - new_first_index.value()});
+    if (is_leader()) {
+        logger.trace("advance_snapshot[{}]: signal {} available units", _my_id, units);
+        leader_state().log_limiter_semaphore->signal(units);
+    }
+    _sm_events.signal();
+    return true;
+}
+
 void fsm::transfer_leadership(logical_clock::duration timeout) {
     check_is_leader();
     auto leader = leader_state().tracker.find(_my_id);

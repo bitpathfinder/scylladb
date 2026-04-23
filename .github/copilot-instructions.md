@@ -99,6 +99,9 @@ ninja build/<mode>/scylla
 - Tests should strive to be repeatable, and not use random input that will make their results unpredictable.
 - Tests should consume as little resources as possible. Prefer running tests on a single node if it is sufficient, for example.
 
+## Pull Requests
+- All PRs created by the agent must be opened as **draft** (`gh pr create --draft`).
+
 ## New Files
 - Include `LicenseRef-ScyllaDB-Source-Available-1.1` in the SPDX header
 - Use the current year for new files; for existing code keep the year as is

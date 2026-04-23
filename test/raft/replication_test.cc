@@ -587,3 +587,15 @@ RAFT_TEST_CASE(simple_follower_read, (test_case{
 RAFT_TEST_CASE(follower_read_after_partition, (test_case{
          .nodes = 4,
          .updates = {entries{4}, partition{0, 1, 2}, entries{4}, partition{0, 1, 2, 3}, read_value{3, 8}}}));
+
+// Verify that when commit_index_is_snapshot is set, take_snapshot() is never called
+// even after many entries are applied.
+SEASTAR_THREAD_TEST_CASE(test_commit_index_is_snapshot_does_not_take_snapshots) {
+    take_snapshot_calls = 0;
+    replication_test<lowres_clock>(test_case{
+        .nodes = 1,
+        .config = {{.commit_index_is_snapshot = true}},
+        .updates = {entries{20}},
+    }, false, tick_delta);
+    BOOST_REQUIRE_EQUAL(take_snapshot_calls, 0);
+}
