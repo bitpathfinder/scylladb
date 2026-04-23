@@ -113,7 +113,7 @@ public:
         } catch (...) {
             throw std::runtime_error(::format("tablet {}, group id {}: error while applying mutations {}", _tablet, _group_id, std::current_exception()));
         }
-        co_return raft::need_snapshot::yes;
+        co_return raft::need_snapshot::no;
     }
 
     future<raft::snapshot_id> take_snapshot() override {
