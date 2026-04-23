@@ -54,6 +54,11 @@ public:
         // but makes timed_out_error more likely.
         bool enable_forwarding = true;
 
+        // If set to true, the server treats the latest commit index as the effective snapshot
+        // index for log compaction purposes. The applier advances the internal snapshot
+        // descriptor without calling state_machine::take_snapshot().
+        bool commit_index_is_snapshot = false;
+
         // Max size of a single command, add_entry with a bigger command will throw command_is_too_big_error.
         // The following condition must be satisfied:
         // max_command_size <= max_log_size - snapshot_trailing_size

@@ -382,7 +382,8 @@ future<> server_impl::start() {
                                  fsm_config {
                                      .append_request_threshold = _config.append_request_threshold,
                                      .max_log_size = _config.max_log_size,
-                                     .enable_prevoting = _config.enable_prevoting
+                                     .enable_prevoting = _config.enable_prevoting,
+                                     .commit_index_is_snapshot = _config.commit_index_is_snapshot
                                  },
                                  _events);
 
@@ -572,7 +573,7 @@ future<> server_impl::wait_for_entry(entry_id eid, wait_type type, seastar::abor
                 throw dropped_entry();
             }
 
-            if (type == wait_type::applied && _fsm->log_last_snapshot_idx() >= eid.idx) {
+            if (type == wait_type::applied && !_config.commit_index_is_snapshot && _fsm->log_last_snapshot_idx() >= eid.idx) {
                 // We know the entry was committed but the wait type is `applied`
                 // and we don't know if the entry was applied with `state_machine::apply`
                 // (we may've loaded a snapshot before we managed to apply the entry).
@@ -1404,7 +1405,16 @@ future<> server_impl::applier_fiber() {
 
                 const bool force_snapshot = utils::get_local_injector().enter("raft_server_force_snapshot") || sm_needs_snapshot;
 
-                if (force_snapshot || (_applied_idx > last_snap_idx &&
+                if (_config.commit_index_is_snapshot) {
+                    const auto max_trailing = force_snapshot ? 0 : _config.snapshot_trailing;
+                    const auto max_trailing_bytes = force_snapshot ? 0 : _config.snapshot_trailing_size;
+                    if (_applied_idx > last_snap_idx &&
+                            !_fsm->advance_snapshot(_applied_idx, last_term, max_trailing, max_trailing_bytes, true)) {
+                        logger.trace("[{}] applier fiber: while advancing implicit snapshot term={} idx={},"
+                                " fsm already has snapshot at idx={}",
+                                _id, last_term, _applied_idx, _fsm->log_last_snapshot_idx());
+                    }
+                } else if (force_snapshot || (_applied_idx > last_snap_idx &&
                     ((_applied_idx - last_snap_idx).value() >= _config.snapshot_threshold ||
                     _fsm->log_memory_usage() >= _config.snapshot_threshold_log_size)))
                 {
@@ -1446,6 +1456,14 @@ future<> server_impl::applier_fiber() {
                 auto applied_term = _fsm->log_term_for(_applied_idx);
                 // last truncation index <= snapshot index <= applied index
                 SCYLLA_ASSERT(applied_term);
+
+                if (_config.commit_index_is_snapshot) {
+                    if (!_fsm->advance_snapshot(_applied_idx, *applied_term, 0, 0, true)) {
+                        logger.trace("[{}] trigger_snapshot: advance_snapshot ignored (fsm already at idx={})"
+                                , _id, _fsm->log_last_snapshot_idx());
+                    }
+                    co_return;
+                }
 
                 snapshot_descriptor snp;
                 snp.term = *applied_term;

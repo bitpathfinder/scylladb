@@ -58,6 +58,8 @@ struct fsm_config {
     size_t max_log_size;
     // If set to true will enable prevoting stage during election
     bool enable_prevoting;
+    // If set to true, commit index can be used as an implicit snapshot index.
+    bool commit_index_is_snapshot = false;
 };
 
 class fsm;
@@ -477,6 +479,12 @@ public:
     // Returns false if the snapshot is older than existing one,
     // the passed snapshot will be dropped in this case.
     bool apply_snapshot(snapshot_descriptor snp, size_t max_trailing_entries, size_t max_trailing_bytes, bool local);
+
+    // Advances the snapshot index without creating a new snapshot id.
+    // Used when commit_index_is_snapshot is enabled: the current snapshot descriptor is
+    // updated in-place (preserving its id) to reflect the latest applied index.
+    // Returns false if the requested index is not newer than the current snapshot.
+    bool advance_snapshot(index_t idx, term_t term, size_t max_trailing_entries, size_t max_trailing_bytes, bool local);
 
     std::optional<std::pair<read_id, index_t>> start_read_barrier(server_id requester);
 
