@@ -1610,6 +1610,10 @@ async def test_data_survives_crash(manager: ManagerClient):
         assert len(snp_rows) == 1, f"Expected snapshot row for group {group_id}"
         assert snp_rows[0].idx > 0, f"Expected snapshot idx > 0 after replay, got {snp_rows[0].idx}"
 
+        # Verify that the snapshot configuration was also persisted during replay.
+        cfg_rows = await cql.run_async(f"SELECT server_id, can_vote FROM system.raft_groups_snapshot_config WHERE shard = 0 AND group_id = {group_id}")
+        assert len(cfg_rows) > 0, f"Expected snapshot config for group {group_id} after replay"
+
     await manager.server_stop_gracefully(server.server_id)
 
 
