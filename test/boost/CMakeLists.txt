@@ -270,6 +270,8 @@ add_scylla_test(sstable_resharding_test
   KIND SEASTAR)
 add_scylla_test(sstable_test
   KIND SEASTAR)
+add_scylla_test(sstable_frozen_size_poc_test
+  KIND SEASTAR)
 add_scylla_test(stall_free_test
   KIND SEASTAR)
 add_scylla_test(stream_compressor_test
